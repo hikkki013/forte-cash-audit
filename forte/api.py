@@ -4,11 +4,13 @@ from contextlib import asynccontextmanager
 import copy
 import hmac
 import os
+import secrets
 from pathlib import Path
 import threading
 import time
 import uuid
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Literal
@@ -32,6 +34,10 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
     slots = threading.BoundedSemaphore(2)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="forte-gpu")
     state = {"analyzer":analyzer, "load_error":None}
+    ui_session = secrets.token_urlsafe(32)
+    ui_root = Path(__file__).resolve().parent.parent / "frontend"
+    variants = {"with-rules":"forte_с_правилами", "simple":"forte_без_правил"}
+    assets = {"app.js", "style.css", "rules.json", "images/logo.png", "images/icon.png"}
 
     @asynccontextmanager
     async def lifespan(app):
@@ -43,11 +49,56 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
     origins = [x.strip() for x in os.environ.get("FORTE_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
     app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=["GET","POST"],allow_headers=["X-API-Key","Content-Type"])
 
-    def auth(x_api_key: str | None = Header(default=None)):
+    def local_browser(request: Request):
+        # No secret in JS, URL, or public bootstrap response. A foreign website
+        # cannot bootstrap/use this cookie with a cross-origin form or fetch.
+        origin = request.headers.get("origin")
+        expected = f"{request.url.scheme}://{request.url.netloc}"
+        if (not request.client or request.client.host not in {"127.0.0.1", "::1"}
+                or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or request.headers.get("x-forte-local") != "1"
+                or (origin is not None and origin != expected)
+                or request.headers.get("sec-fetch-site", "same-origin") not in {"same-origin", "none"}):
+            raise HTTPException(403, "Open the UI on this computer at http://127.0.0.1:8000")
+
+    def auth(request: Request, x_api_key: str | None = Header(default=None)):
+        # An explicit key also works in Swagger when the browser has a UI cookie.
+        if x_api_key is not None:
+            if not secret:
+                raise HTTPException(503,"Set FORTE_API_KEY before starting the server")
+            if not hmac.compare_digest(x_api_key.encode(),secret.encode()):
+                raise HTTPException(401,"Invalid API key")
+            return
+        cookie = request.cookies.get("forte_local_session", "")
+        if cookie and hmac.compare_digest(cookie.encode(), ui_session.encode()):
+            local_browser(request)
+            return
         if not secret:
             raise HTTPException(503,"Set FORTE_API_KEY before starting the server")
         if not x_api_key or not hmac.compare_digest(x_api_key.encode(),secret.encode()):
             raise HTTPException(401,"Invalid API key")
+
+    @app.post("/api/v1/session", dependencies=[Depends(local_browser)])
+    def browser_session(response: Response):
+        response.set_cookie("forte_local_session",ui_session,httponly=True,samesite="strict",path="/",max_age=28800)
+        response.headers["Cache-Control"] = "no-store"
+        return {"ready":True}
+
+    @app.get("/", include_in_schema=False)
+    def home():
+        return RedirectResponse("/ui/with-rules/")
+
+    @app.get("/ui/{variant}/", include_in_schema=False)
+    def ui_page(variant: str):
+        if variant not in variants:
+            raise HTTPException(404)
+        return FileResponse(ui_root/variants[variant]/"index.html",headers={"Cache-Control":"no-store"})
+
+    @app.get("/ui/{variant}/{asset:path}", include_in_schema=False)
+    def ui_asset(variant: str, asset: str):
+        if variant not in variants or asset not in assets:
+            raise HTTPException(404)
+        return FileResponse(ui_root/variants[variant]/asset,headers={"Cache-Control":"no-store"})
 
     def cleanup():
         now = time.monotonic()
@@ -77,8 +128,15 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
             with guard:
                 jobs[job_id].update(status="failed",error="analysis_timeout")
         except (ValueError, FileNotFoundError) as exc:
+            safe_errors = {
+                "Unsupported camera aspect. Configure scene zones for this camera.",
+                "No people detected; scene cannot be evaluated",
+                "Local model missing. Run python -m scripts.download_model first.",
+            }
+            # Decoder exceptions may include the private upload path.
+            message = str(exc) if str(exc) in safe_errors else "invalid_video_or_configuration"
             with guard:
-                jobs[job_id].update(status="failed",error=str(exc))
+                jobs[job_id].update(status="failed",error=message)
         except Exception:
             # Do not leak paths, tokens or internal exceptions over the API.
             with guard:

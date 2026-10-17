@@ -17,6 +17,6 @@ if (!$env:FORTE_API_KEY) {
 $env:HF_HUB_OFFLINE = '1'
 $env:TRANSFORMERS_OFFLINE = '1'
 $env:PYTHONUTF8 = '1'
-Write-Host 'Local API: http://127.0.0.1:8000/docs ; stop with Ctrl+C'
+Write-Host 'Open the web interface: http://127.0.0.1:8000 ; stop with Ctrl+C'
 & '.\.venv\Scripts\python.exe' -m uvicorn forte.api:app --host 127.0.0.1 --port 8000 --workers 1
 exit $LASTEXITCODE

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
 function element() {
-  return {textContent:'',innerHTML:'',style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},duration:20};
+  return {textContent:'',innerHTML:'',style:{},classList:{add(){},remove(){},toggle(){}},addEventListener(){},duration:20,pause(){},load(){},removeAttribute(){}};
 }
 
 (async () => {
@@ -19,7 +19,7 @@ function element() {
         return elements[id] ??= element();
       },querySelectorAll(){return [];},addEventListener(){}},
       fetch:async()=>({ok:true,json:async()=>rules}),
-      setTimeout(fn){fn();}, console,
+      setTimeout(fn){fn();}, console, URL:{createObjectURL(){return 'blob:test';},revokeObjectURL(){}},
     });
     vm.runInContext(fs.readFileSync(root+'app.js','utf8'),ctx);
     await vm.runInContext('loadRules()',ctx);
@@ -33,6 +33,12 @@ function element() {
     assert.equal((await vm.runInContext('waitForResult("test")',ctx)).verdict,'violation');
     ctx.fetch=async()=>({ok:true,json:async()=>({status:'done',result:null})});
     await assert.rejects(vm.runInContext('waitForResult("test")',ctx),/Некорректный ответ/);
+    vm.runInContext('selectFile({name:"jury.mp4",size:1024})',ctx);
+    assert.equal(vm.runInContext('state.file.name',ctx),'jury.mp4');
+    vm.runInContext('state.isBusy=true; selectFile({name:"other.mov",size:1024})',ctx);
+    assert.equal(vm.runInContext('state.file.name',ctx),'jury.mp4');
+    vm.runInContext('state.isBusy=false; resetAll()',ctx);
+    assert.equal(vm.runInContext('state.file',ctx),null);
     for(const [file,hash] of Object.entries({
       'style.css':'6A1E5EB4C381FBB535E1E9F4212029D1D129F1A0097A3D83F68201A27687E3DE',
       'images/logo.png':'90F56E9BBB34206AE614CC983FAD0183CA215805EE9B0261F67171752641B984',

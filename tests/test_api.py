@@ -6,7 +6,7 @@ from forte.api import create_app
 class FakeAnalyzer:
     def analyze(self,path,deadline=None):
         if path.read_bytes()==b"corrupt":
-            raise ValueError("Invalid video")
+            raise ValueError(f"Invalid video: {path}")
         return {"verdict":"no_violation","violations":[],"warnings":["TEST ONLY"],"observations":[]}
 
 def poll(c,jid):
@@ -35,6 +35,8 @@ def test_success_and_failure_cleanup(tmp_path):
                 assert "observations" not in job["result"]
             else:
                 assert job["result"] is None
+                assert job["error"] == "invalid_video_or_configuration"
+                assert str(tmp_path) not in str(job)
         assert c.get('/api/v1/jobs/missing',headers={"X-API-Key":"test"}).status_code==404
     assert not list(tmp_path.iterdir())
 

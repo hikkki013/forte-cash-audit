@@ -13,8 +13,7 @@
 
 /* ---------- 1. Настройки ---------- */
 const CONFIG = {
-  apiKey: "change-me",            // тот же ключ, что в переменной окружения API_KEY на сервере
-  maxFileMb: 50,                  // максимальный размер файла
+  maxFileMb: 200,                 // соответствует лимиту API; ключ не хранится в JS
   pollIntervalMs: 2000,           // как часто спрашивать статус задачи
   timeoutMs: 5 * 60 * 1000,       // сколько ждать результат (по ТЗ — 5 минут)
 };
@@ -86,18 +85,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Проверяет файл и показывает превью */
 function selectFile(file) {
+  if (state.isBusy) return;
   showError("");
   if (!file) return;
 
-  if (!/\.mov$/i.test(file.name)) {
-    showError("Допустим только формат .mov");
+  if (!/\.(mov|mp4)$/i.test(file.name)) {
+    showError("Выберите видео MOV или MP4");
     return;
   }
+  if (!file.size) { showError("Файл пустой. Выберите другое видео."); return; }
   if (file.size > CONFIG.maxFileMb * 1024 * 1024) {
     showError(`Файл больше ${CONFIG.maxFileMb} МБ`);
     return;
   }
 
+  resetAll();
   state.file = file;
   el.fileName.textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} МБ`;
 
@@ -112,12 +114,19 @@ function selectFile(file) {
 
 /* ---------- 5. Работа с API ---------- */
 
-/** Запрос к API с ключом. При ошибке бросает Error с понятным текстом */
+/** Запрос к локальному API с cookie-сессией. Ошибки показываются пользователю. */
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { "X-API-Key": CONFIG.apiKey },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      credentials: "same-origin",
+      headers: { "X-Forte-Local": "1" },
+      signal: typeof AbortSignal !== "undefined" ? AbortSignal.timeout(60000) : undefined,
+    });
+  } catch (_) {
+    throw new Error("Нет ответа от локального сервера. Проверьте, что окно запуска открыто.");
+  }
 
   if (!response.ok) {
     let message = `Ошибка сервера (${response.status})`;
@@ -125,7 +134,15 @@ async function apiRequest(path, options = {}) {
       const data = await response.json();
       if (data.detail) message = data.detail;
     } catch (_) { /* тело ответа не JSON — оставляем текст по умолчанию */ }
-    throw new Error(message);
+    const errors = {
+      401: "Сессия истекла. Повторите запуск анализа.",
+      403: "Откройте интерфейс на http://127.0.0.1:8000 на компьютере с сервером.",
+      404: "Задание не найдено: возможно, сервер был перезапущен.",
+      413: "Видео превышает лимит 200 МиБ.",
+      415: "Поддерживаются видео MOV и MP4.",
+      429: "Сервер занят. Дождитесь окончания предыдущих проверок.",
+    };
+    throw new Error(errors[response.status] || message);
   }
   return response.json();
 }
@@ -156,7 +173,17 @@ async function waitForResult(jobId) {
       }
       return result;
     }
-    if (job.status === "failed") throw new Error(job.error || "Не удалось обработать видео");
+    if (job.status === "failed") {
+      const errors = {
+        analysis_timeout: "Превышено время анализа. Результат не получен.",
+        analysis_failed: "Не удалось обработать видео. Проверьте файл или журнал сервера.",
+        invalid_video_or_configuration: "Не удалось прочитать видео или применить настройки. Проверьте файл и профиль камеры; результат не получен.",
+        "Local model missing. Run python -m scripts.download_model first.": "Веса модели не установлены. Выполните первоначальную установку проекта.",
+        "Unsupported camera aspect. Configure scene zones for this camera.": "Этот формат кадра не подходит профилю камеры. Нужна настройка зон; результат не получен.",
+        "No people detected; scene cannot be evaluated": "Люди не обнаружены — оценить эту сцену не удалось.",
+      };
+      throw new Error(errors[job.error] || job.error || "Не удалось обработать видео");
+    }
   }
 }
 
@@ -165,6 +192,7 @@ async function startAnalysis() {
   if (!state.file || state.isBusy) return;
 
   state.isBusy = true;
+  el.fileInput.disabled = true;
   showError("");
   el.startBtn.disabled = true;
   el.placeholder.classList.add("is-hidden");
@@ -172,13 +200,16 @@ async function startAnalysis() {
   el.loader.style.display = "block";
 
   try {
-    setStep(1, "Загрузка видео на сервер…");
+    setStep(1, "Подключение к локальному серверу…");
+    await apiRequest("/api/v1/session", {method:"POST"});
+    setStep(1, "Загрузка видео на этот компьютер…");
     const jobId = await uploadVideo(state.file);
 
     setStep(2, "Анализ видео…");
     const result = await waitForResult(jobId);
 
-    setStep(3, "Анализ завершён");
+    const seconds = Number(result.meta?.processing_sec);
+    setStep(3, Number.isFinite(seconds) ? `Анализ завершён · обработка ${seconds.toFixed(1)} с` : "Анализ завершён");
     renderResult(result);
   } catch (err) {
     setStep(0, "Не удалось выполнить проверку");
@@ -188,6 +219,7 @@ async function startAnalysis() {
   } finally {
     el.loader.style.display = "none";
     state.isBusy = false;
+    el.fileInput.disabled = false;
   }
 }
 
@@ -243,7 +275,7 @@ async function loadRules() {
 function frameHtml(frame) {
   return `
     <div class="frame" data-zoom>
-      <img src="data:image/jpeg;base64,${frame.image_base64}" alt="Кадр ${formatTime(frame.timestamp_sec)}">
+      <img src="data:image/jpeg;base64,${escapeHtml(frame.image_base64)}" alt="Кадр ${formatTime(frame.timestamp_sec)}">
       <span>кадр · ${formatTime(frame.timestamp_sec)}</span>
     </div>`;
 }
@@ -316,6 +348,10 @@ function renderResult(result) {
   el.verdictText.textContent = hasViolations
     ? `Найдено событий: ${violations.length}. Это предположения модели, проверьте их вручную.`
     : "Это не подтверждает отсутствие других нарушений.";
+  if (result.warnings?.length) {
+    el.verdictText.textContent += " Проверка ограничена включёнными сценариями и настройками камеры.";
+  }
+  state.lastResult = result;
 
   el.startBtn.classList.add("is-hidden");
   el.resetBtn.classList.remove("is-hidden");
@@ -328,18 +364,31 @@ function renderResult(result) {
 
 /** Перематывает превью за 1 секунду до события */
 function seekVideo(seconds) {
+  if (!Number.isFinite(el.preview.duration)) {
+    showError("Браузер не может воспроизвести это видео. Откройте исходный файл в проигрывателе на указанной секунде.");
+    return;
+  }
   el.preview.currentTime = Math.max(0, seconds - 1);
-  el.preview.play();
+  el.preview.play()?.catch(() => showError("Не удалось включить воспроизведение. Используйте кадры или откройте видео в проигрывателе."));
   el.preview.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 /** Возвращает форму в исходное состояние */
 function resetAll() {
+  if (state.isBusy) return;
   state.file = null;
+  state.lastResult = null;
+  if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
+  state.videoUrl = null;
+  el.preview.pause();
   el.fileInput.value = "";
-  el.fileName.textContent = "Перетащите файл .mov или нажмите для выбора";
+  el.fileName.textContent = "Перетащите MOV/MP4 или нажмите для выбора";
   el.preview.style.display = "none";
   el.preview.removeAttribute("src");
+  el.preview.load();
+  el.violations.innerHTML = "";
+  el.timelineBlock.classList.add("is-hidden");
+  el.lightbox.style.display = "none";
 
   el.result.classList.add("is-hidden");
   el.placeholder.classList.remove("is-hidden");
@@ -400,3 +449,6 @@ document.addEventListener("click", (e) => {
 
 // Старт
 loadRules();
+el.preview.addEventListener("loadedmetadata", () => {
+  if (state.lastResult?.violations?.length) renderTimeline(state.lastResult.violations);
+});
