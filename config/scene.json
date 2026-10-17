@@ -1,15 +1,24 @@
 {
-  "name": "forte_training_camera_v1",
+  "name": "forte_training_camera_v2_experimental",
   "expected_aspect": 0.54717,
   "desk": [0.12, 0.35, 0.80, 0.67],
-  "cashier": [0.34, 0.39, 0.60, 0.55],
+  "cashier": [0.24, 0.39, 0.60, 0.55],
   "client": [0.18, 0.56, 0.87, 0.88],
   "safe": [0.40, 0.32, 0.67, 0.55],
   "exit": [0.13, 0.20, 0.30, 0.42],
   "require_exit": true,
   "absence_seconds": 3.0,
   "safe_seconds": 5.0,
+  "safe_calibration": "safe_prototypes.json",
+  "key_calibration": "key_calibration.json",
   "sample_seconds": 1.0,
-  "enabled_rules": ["cash_unattended"],
-  "note": "Development calibration for rear-seat cashier layout only. Both prev_client_cash and safe_left_open are experimental and disabled. Thresholds are engineering settings, not legal deadlines."
+  "door": [0.08, 0.15, 0.36, 0.45],
+  "service_absence_seconds": 5,
+  "screen_absence_seconds": 5,
+  "screen_search": [0.35, 0.30, 0.85, 0.60],
+  "cash_return_search": [0.20, 0.44, 0.52, 0.59],
+  "cash_continuity_search": [0.20, 0.46, 0.58, 0.57],
+  "desk_material_search": [0.23, 0.40, 0.67, 0.56],
+  "enabled_rules": ["cash_unattended", "prev_client_cash", "safe_left_open", "left_during_service", "personal_items", "phone_with_camera", "door_open", "camera_obstructed", "food_at_workplace", "pc_not_shutdown", "possible_incomplete_cash_return", "bag_left_by_employee", "bag_left_by_visitor", "several_clients", "desk_materials_left", "key_left_in_lock"],
+  "note": "Experimental multi-rule candidate search for known camera layouts only. Sixteen visual heuristics, not certified violation detection. Front-operator layout inferred from initial observations. Cabinet and lock calibration supports one camera/cabinet position. Thresholds are engineering settings, not legal deadlines. Other catalog rules require manual evidence."
 }

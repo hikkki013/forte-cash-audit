@@ -32,6 +32,7 @@ const el = {
   placeholder: document.getElementById("placeholder"),
   loader: document.getElementById("loader"),
   result: document.getElementById("result"),
+  ruleChecks: document.getElementById("ruleChecks"),
   verdict: document.getElementById("verdict"),
   verdictTitle: document.getElementById("verdictTitle"),
   verdictText: document.getElementById("verdictText"),
@@ -233,9 +234,8 @@ function catalogItemHtml(rule) {
   return `
     <div class="rule-item">
       <h4>${escapeHtml(rule.title)} <span class="tag">${escapeHtml(rule.point)}</span></h4>
-      <p>${escapeHtml(rule.text)}</p>
       <p><b>Что видно на видео:</b> ${escapeHtml(rule.visible)}</p>
-      <p><b>Ограничения:</b> ${escapeHtml(rule.limits)}</p>
+      ${ruleHtml(rule, false)}
     </div>`;
 }
 
@@ -250,10 +250,10 @@ function referenceGroupHtml(group) {
 function setRules(data) {
   rulesState.source = data.source;
   rulesState.byId = Object.fromEntries(data.rules.map((r) => [r.id, r]));
-  el.catalogMeta.textContent = "Источник: " + data.source;
+  el.catalogMeta.textContent = "Правила, основания проверок и источники";
   const groups = (data.reference || []).map(referenceGroupHtml).join("");
   el.catalogList.innerHTML =
-    `<h4 class="catalog__h">Включено в прототипе (${data.rules.length})</h4>` +
+    `<h4 class="catalog__h">Все пункты каталога (${data.rules.length})</h4>` +
     data.rules.map(catalogItemHtml).join("") +
     (groups ? `<h4 class="catalog__h">Другие сценарии — пока не проверяются</h4>${groups}` : "");
 }
@@ -262,7 +262,7 @@ function setRules(data) {
 async function loadRules() {
   if (!el.catalog) return; // Вариант без справочника.
   try {
-    const response = await fetch("rules.json");
+    const response = await fetch("/api/v1/rules");
     setRules(await response.json());
   } catch (_) {
     el.catalog.classList.add("is-hidden");
@@ -281,11 +281,33 @@ function frameHtml(frame) {
 }
 
 /** Блок «Правило и источник»: берём из справочника по rule_id, иначе из строки rule */
-function ruleHtml(violation) {
-  const rule = rulesState.byId[violation.rule_id];
+function ruleHtml(violation, showTitle = true) {
+  // A report carries its own metadata snapshot; do not silently replace it with a newer catalog.
+  const rule = violation.source !== undefined ? violation : rulesState.byId[violation.rule_id];
   if (rule) {
-    return `<div class="rule"><b>Сценарий проверки:</b> ${escapeHtml(rulesState.source)}, <b>${escapeHtml(rule.point)}</b>
-              <span class="rule__text">${escapeHtml(rule.text)}</span></div>`;
+    let link = "";
+    try {
+      const url = new URL(rule.source);
+      if (url.protocol === "https:" && url.hostname === "adilet.zan.kz" && !url.username && !url.password) {
+        link = `<a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(rule.source_title || "Нормативный источник — Әділет")}</a>`;
+      }
+    } catch (_) { /* Missing or unsafe URL is never rendered as a link. */ }
+    const line = (label, value) => value
+      ? `<span class="rule__text"><b>${escapeHtml(label)}:</b> ${escapeHtml(value)}</span>` : "";
+    const kinds = {
+      normative_conditional: "Нормативное требование — применимость проверяется",
+      mixed_basis: "Смешанное основание: нормативные требования и внутренний регламент",
+      internal_policy_required: "Требуется внутренний регламент банка",
+      additional_source_required: "Требуется отдельный нормативный источник или регламент",
+      technical_check: "Техническая проверка",
+      analytical_check: "Аналитический признак для проверки",
+      unreviewed: "Нормативная привязка не проверена",
+    };
+    const title = showTitle ? `<b>Правило:</b> ${escapeHtml(rule.rule_title || rule.title || violation.type || "Сценарий проверки")}` : "";
+    const point = rule.paragraph && rule.paragraph !== "—" ? ` · ${escapeHtml(rule.paragraph)}` : "";
+    return `<div class="rule">${title}
+      ${line("Основание проверки", kinds[rule.basis_type] || kinds.unreviewed)}
+      <span class="rule__text"><b>Источник:</b> ${link || "Нормативный источник не установлен"}${link ? point : ""}</span></div>`;
   }
   if (violation.rule) {
     return `<div class="rule"><b>Правило и источник:</b> ${escapeHtml(violation.rule)}</div>`;
@@ -304,7 +326,7 @@ function violationHtml(violation, index) {
     prev_client_cash: "Банкноты при следующем посетителе",
     safe_left_open: "Возможно открытый сейф",
   };
-  const title = titles[violation.type] || rulesState.byId[violation.rule_id]?.title || violation.type || "Событие для проверки";
+  const title = violation.title || titles[violation.type] || rulesState.byId[violation.rule_id]?.title || violation.type || "Событие для проверки";
 
   return `
     <div class="violation" id="violation-${index}">
@@ -312,7 +334,7 @@ function violationHtml(violation, index) {
       <div>
         <span class="tag">${formatTime(violation.timecode_sec)} · ${Number(violation.timecode_sec).toFixed(1)} с</span>
         <h3>${escapeHtml(title)}</h3>
-        <p>${escapeHtml(violation.description)}</p>
+        <p>Предполагаемое нарушение. Требует перепроверки.</p>
         ${rule}
         <button class="seek-btn" data-seek="${violation.timecode_sec}">▶ Показать момент на видео</button>
       </div>
@@ -341,17 +363,32 @@ function renderResult(result) {
   el.placeholder.classList.add("is-hidden");
   el.result.classList.remove("is-hidden");
 
-  el.verdict.classList.toggle("verdict--ok", !hasViolations);
+  const unresolved = (result.rule_checks || []).filter(c => ["not_implemented","insufficient_evidence","disabled"].includes(c.status)).length;
+  const incomplete = result.coverage_status === "partial" || unresolved > 0;
+  el.verdict.classList.toggle("verdict--ok", !hasViolations && !incomplete);
   el.verdictTitle.textContent = hasViolations
-    ? "Найдены события для проверки"
-    : "По включённому правилу событий нет";
+    ? "Обнаружены признаки возможных нарушений"
+    : "Нарушение не обнаружено";
   el.verdictText.textContent = hasViolations
-    ? `Найдено событий: ${violations.length}. Это предположения модели, проверьте их вручную.`
-    : "Это не подтверждает отсутствие других нарушений.";
+    ? `Найдено событий: ${violations.length}. Ниже — тип, таймкод, описание, кадры-доказательства и источник для каждого события. Результат требует проверки человеком.`
+    : "По выполненным автоматическим проверкам признаки не найдены. Это не подтверждение соблюдения всех правил.";
   if (result.warnings?.length) {
     el.verdictText.textContent += " Проверка ограничена включёнными сценариями и настройками камеры.";
   }
   state.lastResult = result;
+  if (result.rule_checks?.length) {
+    el.verdictText.textContent += ` Пунктов в отчёте: ${result.rule_checks.length}; без автоматического заключения: ${unresolved}.`;
+  }
+  const statuses = {
+    candidate: "Кандидат — проверьте вручную",
+    not_detected: "Признак не найден",
+    insufficient_evidence: "Недостаточно данных",
+    not_implemented: "Только ручная проверка — детектор не реализован",
+    disabled: "Автопоиск выключен",
+  };
+  if (el.ruleChecks) el.ruleChecks.innerHTML = (result.rule_checks || []).map(c =>
+    `<div class="rule-item"><h4>${escapeHtml(c.title)} — ${escapeHtml(statuses[c.status] || "Неизвестный статус")}</h4></div>`
+  ).join("") || "<p>Отдельные статусы правил не предоставлены сервером.</p>";
 
   el.startBtn.classList.add("is-hidden");
   el.resetBtn.classList.remove("is-hidden");
@@ -387,6 +424,7 @@ function resetAll() {
   el.preview.removeAttribute("src");
   el.preview.load();
   el.violations.innerHTML = "";
+  if (el.ruleChecks) el.ruleChecks.innerHTML = "";
   el.timelineBlock.classList.add("is-hidden");
   el.lightbox.style.display = "none";
 

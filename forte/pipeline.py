@@ -1,16 +1,53 @@
+"""Local multi-rule visual candidate search with explicit per-rule coverage."""
 import base64
-from collections import deque
+from collections import deque, Counter
 import io
 import json
 from pathlib import Path
 import time
+from PIL import ImageStat
 from forte.rules import Observation, RuleEngine
 from forte.vision import sampled_frames
-
+from forte.coverage import rule_checks
+from forte.screen import screen_state
+from forte.cash_return import CashReturnTracker
+from forte.scene_events import SceneEvents
+from forte.safe_state import calibrated_safe_state
+from forte.rule_metadata import rule_metadata
+from forte.key_state import key_state, lock_occupied, KeyLeftTracker
+from forte.desk_clear import DeskClearTracker, desk_materials, LABELS as DESK_LABELS, ITEM_NAMES
 
 def in_zone(box, zone, width, height):
     x, y = (box[0]+box[2])/2/width, (box[1]+box[3])/2/height
     return zone[0] <= x <= zone[2] and zone[1] <= y <= zone[3]
+
+
+def center_inside(box, outer):
+    x, y = (box[0]+box[2])/2, (box[1]+box[3])/2
+    return outer[0] <= x <= outer[2] and outer[1] <= y <= outer[3]
+
+
+def cropped_detections(detector, image, zone, labels):
+    w, h = image.size
+    bounds = tuple(int(v*s) for v,s in zip(zone,[w,h,w,h]))
+    rows = detector.detect(image.crop(bounds), labels)
+    return [{**d,"box":[d["box"][0]+bounds[0],d["box"][1]+bounds[1],
+                        d["box"][2]+bounds[0],d["box"][3]+bounds[1]]} for d in rows]
+
+
+def state_in_zone(detections, prefix, zone, width, height):
+    scores = [max((d["score"] for d in detections
+                   if d["label"] == prefix+"_"+s and in_zone(d["box"],zone,width,height)),default=0)
+              for s in ["open","closed"]]
+    if max(scores) < .35 or abs(scores[0]-scores[1]) < .15:
+        return None
+    return scores[0] > scores[1]
+
+
+def frame_quality(image):
+    stats = ImageStat.Stat(image.resize((64,64)).convert("L"))
+    mean, spread = stats.mean[0], stats.stddev[0]
+    return (mean < 12 and spread < 12) or (mean > 245 and spread < 5)
 
 
 def evidence(t, image):
@@ -24,73 +61,187 @@ class Pipeline:
         self.detector = detector
         self.config = json.loads(Path(config_path).read_text(encoding="utf-8"))
         self.catalog = json.loads(Path(rules_path).read_text(encoding="utf-8"))
+        calibration_name=self.config.get('safe_calibration')
+        calibration=Path(config_path).parent/calibration_name if calibration_name else None
+        self.safe_calibration=json.loads(calibration.read_text(encoding='utf-8')) if calibration and calibration.is_file() else None
+        key_name=self.config.get('key_calibration')
+        key_path=Path(config_path).parent/key_name if key_name else None
+        self.key_calibration=json.loads(key_path.read_text(encoding='utf-8')) if key_path and key_path.is_file() else None
+        unknown = set(self.config["enabled_rules"]) - set(self.catalog)
+        if unknown:
+            raise ValueError("Unknown configured rules")
+        if any(self.catalog[k]["mode"] != "automatic_candidate" for k in self.config["enabled_rules"]):
+            raise ValueError("Manual-review rules cannot be enabled as visual detectors")
 
     def analyze(self, path, deadline=None):
         start = time.monotonic()
         deadline = deadline or start+240
-        engine = RuleEngine(self.config)
-        ring = deque(maxlen=12)
-        events, frames, people_frames, observations = [], 0, 0, []
+        engine = RuleEngine({**self.config,'enabled_rules':[r for r in self.config['enabled_rules'] if r!='prev_client_cash']})
+        scene_events = SceneEvents(self.config)
+        desk_clear = DeskClearTracker(self.config['sample_seconds'])
+        key_tracker = KeyLeftTracker(self.config['sample_seconds'])
+        ring = deque(maxlen=32)
+        cash_return = CashReturnTracker(self.config)
+        events, frames, observations = [], 0, []
+        observable = Counter()
+        enabled = set(self.config["enabled_rules"])
         for t, image in sampled_frames(path, self.config["sample_seconds"], deadline):
             if time.monotonic() > deadline:
                 raise TimeoutError("Video analysis exceeded budget")
             width, height = image.size
             if abs(width/height-self.config["expected_aspect"]) > .04:
                 raise ValueError("Unsupported camera aspect. Configure scene zones for this camera.")
-            people = self.detector.detect(image, ["person"])
-            people = [d for d in people if d["label"] == "person"]
-            people_frames += bool(people)
-            zone = self.config["desk"]
-            crop_box = tuple(int(v*s) for v,s in zip(zone, [width,height,width,height]))
-            cropped = image.crop(crop_box)
-            # Competing prompts reduce the single-label tendency to call a bag cash.
-            objects = self.detector.detect(cropped, ["cash", "bag", "phone", "coat"])
-            cash = []
-            for d in objects:
-                if d["label"] != "cash":
-                    continue
-                b = d["box"]
-                b = [b[0]+crop_box[0],b[1]+crop_box[1],b[2]+crop_box[0],b[3]+crop_box[1]]
-                cash.append({**d,"box":b})
+            degraded = frame_quality(image)
+            observable["camera_obstructed"] += 1
+            people, objects, states, clothing_objects = [], [], [], []
+            screens = []
+            if not degraded:
+                people = [d for d in self.detector.detect(image,["person"]) if d["label"] == "person"]
+                if "pc_not_shutdown" in enabled:
+                    screens = cropped_detections(self.detector,image,
+                        self.config.get("screen_search",[.35,.30,.85,.60]),["screen"])
+                objects = cropped_detections(self.detector,image,self.config["desk"],
+                    ["cash","bag","phone","coat","jacket","cup","food"])
+                if "personal_items" in enabled:
+                    # Fewer competing labels improve small folded-clothing detection.
+                    clothing_objects = cropped_detections(self.detector,image,self.config["desk"],
+                        ["coat","bag","phone"])
+                if enabled & {"safe_left_open","door_open"}:
+                    # Explicit open/closed competition; no detection is UNKNOWN, never closed.
+                    states = cropped_detections(self.detector,image,[.05,.12,.8,.62],
+                        ["safe_open","safe_closed","door_open","door_closed"])
+            cashiers = [d for d in people if in_zone(d["box"],self.config["cashier"],width,height)]
+            clients = [d for d in people if d not in cashiers and in_zone(d["box"],self.config["client"],width,height)]
+            scene_staff,scene_clients,scene_exit=scene_events.roles(t,people,width,height)
+            material_rows=[]
+            materials=[]
+            material_events=[]
+            if 'desk_materials_left' in enabled:
+                if not degraded:
+                    zone=self.config.get('desk_material_search',[.23,.40,.67,.56])
+                    material_rows=cropped_detections(self.detector,image,zone,DESK_LABELS)
+                    materials=desk_materials(material_rows,width,height,zone)
+                material_events=desk_clear.update(t,scene_staff,scene_clients,scene_exit,materials,degraded)
+            if scene_events.front:
+                cashiers,clients=scene_staff,scene_clients
+            detail_cash=[]
+            if not degraded and scene_events.front and 'prev_client_cash' in enabled:
+                zone=self.config.get('cash_continuity_search',[.20,.46,.58,.57])
+                detail_cash=cropped_detections(self.detector,image,zone,['cash'])
+                # Clipped counting machines and crop borders are not banknotes.
+                detail_cash=[d for d in detail_cash if d['score']>=.30 and
+                    d['box'][0]/width>zone[0]+.006 and d['box'][2]/width<zone[2]-.006 and
+                    d['box'][1]/height>zone[1]+.003 and d['box'][3]/height<zone[3]-.003 and
+                    (d['box'][3]-d['box'][1])/height<.06]
+            cash = [d for d in objects if d["label"]=="cash"]
             money = max(cash,key=lambda d:d["score"],default=None)
-            open_state = None
-            if "safe_left_open" in self.config["enabled_rules"]:
-                states = self.detector.detect(image,["safe_open","safe_closed"])
-                opened = max((d["score"] for d in states if d["label"]=="safe_open" and in_zone(d["box"],self.config["safe"],width,height)),default=0)
-                closed = max((d["score"] for d in states if d["label"]=="safe_closed" and in_zone(d["box"],self.config["safe"],width,height)),default=0)
-                if abs(opened-closed) > .15:
-                    open_state = opened > closed
-            o = Observation(t,
-                any(in_zone(d["box"],self.config["cashier"],width,height) for d in people),
-                any(in_zone(d["box"],self.config["client"],width,height) for d in people),
-                bool(money), open_state,
+            def at_cashier(d):
+                return (d["score"] >= .35 and any(center_inside(d["box"],p["box"]) for p in cashiers)
+                    and not any(center_inside(d["box"],p["box"]) for p in clients))
+            phone = any(d["label"]=="phone" and d['score']>=.50 and at_cashier(d) for d in objects)
+            food = any(d["label"] in {"cup","food"} and at_cashier(d) for d in objects)
+            # Exclude coats whose centers lie on people: wearing a coat is not storage.
+            clothing = any(d["label"] in {"coat","jacket"} and d["score"] >= .3
+                and not any(center_inside(d["box"],p["box"]) for p in people) for d in clothing_objects)
+            safe_details=calibrated_safe_state(image,self.safe_calibration) if not degraded else {'open':None}
+            safe = safe_details['open']
+            if safe is None:
+                safe_states=[d for d in states if (d['box'][2]-d['box'][0])/width<.32 and
+                             (d['box'][3]-d['box'][1])/height<.25]
+                safe = state_in_zone(safe_states,"safe",self.config["safe"],width,height)
+            door = state_in_zone(states,"door",self.config.get("door",self.config["exit"]),width,height)
+            screen = screen_state(image,screens)
+            return_detections=[]
+            return_events=[]
+            return_observable=False
+            if 'possible_incomplete_cash_return' in enabled:
+                return_observable=cash_return.prepare(t,people,width,height)
+                if return_observable and not degraded:
+                    return_detections=cropped_detections(self.detector,image,
+                        self.config.get('cash_return_search',[.20,.44,.52,.59]),['cash'])
+                    return_events=cash_return.update(t,return_detections)
+            o = Observation(t,bool(cashiers),bool(clients),bool(money),safe,
                 any(in_zone(d["box"],self.config["safe"],width,height) for d in people),
                 money["box"] if money else None,
-                any(d["score"]>=.5 and in_zone(d["box"],self.config.get("exit",[0,0,0,0]),width,height) for d in people))
+                any(d["score"] >= .5 and (d["box"][3]-d["box"][1])/height > .18
+                    and in_zone(d["box"],self.config.get("exit",[0,0,0,0]),width,height) for d in people),
+                phone,clothing,food,door,degraded,screen['active'])
+            if safe_details.get('open') is not None:
+                z=self.safe_calibration['zone']
+                o.person_near_safe |= any(d['score']>=.45 and d['box'][1]/height<.30 and
+                    d['box'][2]/width>z[0] and d['box'][0]/width<z[2] and d['box'][3]/height>z[1]
+                    for d in people)
+            for key in enabled-{"camera_obstructed","safe_left_open","door_open","pc_not_shutdown","possible_incomplete_cash_return","several_clients","desk_materials_left","key_left_in_lock"}:
+                observable[key] += bool(people) and not degraded
+            observable["safe_left_open"] += safe is not None
+            observable["door_open"] += door is not None
+            observable["pc_not_shutdown"] += screen['active'] is not None
+            observable['possible_incomplete_cash_return'] += return_observable and not degraded
+            observable['several_clients'] += scene_events.front and not degraded and bool(scene_staff)
+            observable['desk_materials_left'] += bool(materials) and not degraded
+            scene_objects=[d for d in objects if d['label']!='cash']+(detail_cash if scene_events.front else cash)
+            scene_candidates=scene_events.update(t,scene_staff,scene_clients,scene_exit,scene_objects,degraded)
+            key_details={'present':None,'reason':'disabled'}
+            key_events=[]
+            if 'key_left_in_lock' in enabled:
+                key_details=key_state(image,self.key_calibration,people,degraded)
+                occupied=lock_occupied(image,self.key_calibration,people)
+                key_events=key_tracker.update(t,key_details['present'],occupied or bool(scene_staff),
+                    bool(scene_clients),scene_exit or o.at_exit,degraded)
+                observable['key_left_in_lock'] += key_details['present'] is not None
+            if scene_events.departed_at is not None:
+                # Money retained from an earlier visit is not evidence of
+                # incomplete return of the current visitor's money.
+                return_events=[]
             observations.append({"timestamp_sec":t,"cashier":o.cashier,"client":o.client,"cash":o.cash,
-                "safe_open":o.safe_open,"at_exit":o.at_exit,"people":people,"cash_detections":cash})
+                "safe_open":safe,"door_open":door,"at_exit":o.at_exit,"phone_at_cashier":phone,
+                "clothing_on_desk":clothing,"food_at_cashier":food,"camera_degraded":degraded,
+                "people":people,"cash_detections":cash,"object_detections":objects,"state_detections":states,
+                "clothing_detections":clothing_objects,"screen":screen,"screen_detections":screens,
+                "cash_return_observable":return_observable,"cash_return_detections":return_detections})
+            observations[-1].update({'front_operator':scene_events.front,'visitor_count':len(scene_clients),
+                                     'desk_material_detections':material_rows,'desk_materials':materials,
+                                     'cash_continuity_detections':detail_cash,
+                                     'safe_calibration':safe_details})
+            observations[-1]['key_state']=key_details
             ring.append((t,image.copy()))
-            for event in engine.update(o):
+            for event in engine.update(o)+return_events+scene_candidates+material_events+key_events:
                 rule = self.catalog[event["rule_id"]]
                 selected = []
-                for target in [max(0,event["timecode_sec"]-1),event["timecode_sec"],t]:
+                for target in event.get('evidence_times',[max(0,event["timecode_sec"]-1),event["timecode_sec"],t]):
                     chosen = min(ring,key=lambda p:abs(p[0]-target))
                     if all(x[0]!=chosen[0] for x in selected):
                         selected.append(chosen)
-                description = rule["description"].format(**event)
-                description += f' Основание для проверки: {rule["paragraph"]}, {rule["source"]}. {rule["legal_status"]}'
-                events.append({"type":rule["type"],"timecode_sec":event["timecode_sec"],
+                description = rule["description"] + " " + rule["limits"]
+                if event['rule_id']=='desk_materials_left':
+                    names=', '.join(ITEM_NAMES[k] for k in event['detected_items'])
+                    description=f'После ухода сотрудника на столе остались: {names}. ' + rule['limits']
+                if event['rule_id'] == 'pc_not_shutdown':
+                    description = (f"После ухода сотрудника из рабочей зоны экран оставался визуально активным "
+                        f"не менее {event['duration_sec']:g} с; наблюдалось движение человека в зоне выхода. "
+                        "Это признак возможного оставления компьютера активным без присмотра. " + rule['limits'])
+                events.append({"type":rule["event_title"],"rule_id":event["rule_id"],
+                    "title":rule["event_title"],"timecode_sec":event["timecode_sec"],
                     "confirmed_at_sec":event["confirmed_at"],"review_required":True,
+                    "classification":"visual_candidate",**rule_metadata(rule),
                     "description":description,"evidence_frames":[evidence(ts,im) for ts,im in selected]})
+                if 'detected_items' in event:
+                    events[-1]['detected_items']=event['detected_items']
             frames += 1
         if not frames:
             raise ValueError("Video has no decodable timestamped frames")
-        if not people_frames:
-            raise ValueError("No people detected; scene cannot be evaluated")
-        return {"verdict":"violation" if events else "no_violation", "violations":events,
-            "warnings":["Research prototype. no_violation means no enabled rule triggered, not proof of full compliance.",
-                "Fixed zones for supplied camera; new camera angle is not validated.",
-                "Bags are not treated as cash. Safe rule disabled unless explicitly configured."],
+        checks = rule_checks(self.catalog,enabled,events,observable,frames,self.config["sample_seconds"])
+        unresolved = sum(c["status"] in {"not_implemented","insufficient_evidence","disabled"} for c in checks)
+        # The task specification requires a binary detection verdict, not a
+        # compliance certificate. Coverage remains separate from that verdict.
+        return {"verdict":"violation" if events else "no_violation",
+            "coverage_status":"partial" if unresolved else "complete",
+            "violations":events,"rule_checks":checks,
+            "warnings":["Результаты — визуальные кандидаты для ручной проверки, не установленное нарушение.",
+                "Профиль зон настроен для исходной камеры. Другой ракурс не валидирован.",
+                "Отсутствие детекции не доказывает отсутствие предмета или действия.",
+                "Для части правил текст пунктов сверен с предоставленным PDF; применимость к событию и актуальность онлайн-редакции не подтверждены."],
             "meta":{"model":"grounding-dino-tiny","enabled_rules":self.config["enabled_rules"],
+                "catalog_rules":len(checks),"automatic_rules":len(enabled),"unresolved_rules":unresolved,
                 "sampled_frames":frames,"processing_sec":round(time.monotonic()-start,2),
-                "peak_gpu_mb":self.detector.memory_mb()}, "observations":observations}
+                "peak_gpu_mb":self.detector.memory_mb()},"observations":observations}

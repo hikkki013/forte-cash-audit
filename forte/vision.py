@@ -8,8 +8,19 @@ PROMPTS = {
     "bag": "a bag",
     "phone": "a mobile phone",
     "coat": "a coat",
+    "jacket": "a jacket",
     "safe_open": "an open metal cabinet",
     "safe_closed": "a closed metal cabinet",
+    "door_open": "an open door",
+    "door_closed": "a closed door",
+    "cup": "a cup",
+    "food": "food",
+    "screen": "a computer screen",
+    "notebook": "a notebook",
+    "coin_container": "a coin tray",
+    "container": "a small container",
+    "laptop": "a laptop",
+    "coins": "coins",
 }
 
 

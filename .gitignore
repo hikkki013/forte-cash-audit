@@ -15,3 +15,5 @@ __pycache__/
 runtime/
 outputs/
 *.egg-info/
+dist/
+tmp/

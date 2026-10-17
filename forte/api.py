@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import copy
 import hmac
+import json
 import os
 import secrets
 from pathlib import Path
@@ -14,6 +15,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Literal
+from forte.rule_metadata import rule_metadata
 
 
 class Accepted(BaseModel):
@@ -23,6 +25,8 @@ class Accepted(BaseModel):
 class JobResponse(BaseModel):
     job_id: str
     status: Literal["processing", "done", "failed"]
+    verdict: Literal["violation", "no_violation"] | None = None
+    violations: list[dict] | None = None
     result: dict | None = None
     error: str | None = None
 
@@ -152,6 +156,14 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
         return {"status":"ok","prototype":True,"api_key_configured":bool(secret),
             "model_files_present":Path(os.environ.get("FORTE_MODEL_DIR","models/grounding-dino-tiny"),"model.safetensors").exists()}
 
+    @app.get("/api/v1/rules")
+    def catalog():
+        rows = json.loads((ui_root.parent/"config"/"rules.json").read_text(encoding="utf-8"))
+        return {"source":"Постановление НБРК № 231: часть пунктов сверена с предоставленным PDF от 17.10.2026; остальные основания требуют проверки. Применимость к событию и актуальность онлайн-редакции не подтверждены.",
+            "rules":[{**rule_metadata(r),"id":key,"title":r["title"],"point":r.get("paragraph") or "Без нормативной ссылки",
+                "text":r["description"],"visible":"Автоматический поиск кандидатов" if r["mode"]=="automatic_candidate" else "Требуется ручная проверка; детектор не реализован",
+                "limits":r["limits"],"mode":r["mode"]} for key,r in rows.items()]}
+
     @app.post("/api/v1/analyze",status_code=202,response_model=Accepted,dependencies=[Depends(auth)])
     async def analyze(file: UploadFile = File(...)):
         if Path(file.filename or "").suffix.lower() not in {".mov",".mp4"}:
@@ -197,6 +209,11 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
                 raise HTTPException(404,"Job not found or expired")
             record = copy.deepcopy(jobs[job_id])
         record.pop("created",None)
+        if record["status"] == "done":
+            # Required top-level fields from section 10 of the task. Keep
+            # result as a compatibility extension for existing integrations.
+            record["verdict"] = record["result"]["verdict"]
+            record["violations"] = record["result"]["violations"]
         return record
 
     return app

@@ -19,6 +19,13 @@ def test_web_assets_and_no_source_exposure(tmp_path):
             for path in ['main.py','../../runtime/api-key.txt','../api.py']:
                 assert c.get(f'/ui/{variant}/{path}').status_code==404
         assert 'secret-test' not in c.get('/ui/with-rules/app.js').text
+        rules=c.get('/api/v1/rules').json()['rules']
+        assert len(rules)==33 and sum(r['mode']=='automatic_candidate' for r in rules)==16
+        bag=next(r for r in rules if r['id']=='bag_left_by_visitor')
+        assert bag['source_text_verified'] and not bag['source_verified']
+        assert 'нарушением целостности' in bag['applicability']
+        pc=next(r for r in rules if r['id']=='pc_not_shutdown')
+        assert pc['source'] is None and pc['basis_type']=='internal_policy_required'
 
 def test_local_session_cookie_and_upload(tmp_path):
     with client(tmp_path) as c:

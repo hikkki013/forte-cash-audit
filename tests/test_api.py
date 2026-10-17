@@ -33,8 +33,11 @@ def test_success_and_failure_cleanup(tmp_path):
             assert job["status"]==expected
             if expected=="done":
                 assert "observations" not in job["result"]
+                assert job["verdict"] == job["result"]["verdict"] == "no_violation"
+                assert job["violations"] == job["result"]["violations"] == []
             else:
                 assert job["result"] is None
+                assert job["verdict"] is None and job["violations"] is None
                 assert job["error"] == "invalid_video_or_configuration"
                 assert str(tmp_path) not in str(job)
         assert c.get('/api/v1/jobs/missing',headers={"X-API-Key":"test"}).status_code==404
@@ -43,6 +46,23 @@ def test_success_and_failure_cleanup(tmp_path):
 def test_missing_server_key_fails_closed(tmp_path):
     with TestClient(create_app(FakeAnalyzer(),"",tmp_path)) as c:
         assert c.post('/api/v1/analyze',files={"file":("x.mov",b"x")}).status_code==503
+
+
+def test_jury_top_level_contract_with_multiple_events(tmp_path):
+    # Contract-only test; model accuracy is evaluated separately on real videos.
+    class Multiple:
+        def analyze(self, path, deadline=None):
+            return {"verdict":"violation", "coverage_status":"partial",
+                "violations":[{"type":"Тестовое событие", "timecode_sec":t,
+                    "description":"Синтетическое наблюдение для теста контракта",
+                    "evidence_frames":[]} for t in [1.0, 5.0]]}
+    with TestClient(create_app(Multiple(), "test", tmp_path)) as c:
+        accepted=c.post('/api/v1/analyze',headers={"X-API-Key":"test"},files={"file":("x.mov",b"test")})
+        job=poll(c,accepted.json()['job_id'])
+        assert job['status']=='done' and job['verdict']=='violation'
+        assert len(job['violations'])==2
+        assert job['violations']==job['result']['violations']
+        assert job['result']['coverage_status']=='partial'
 
 def test_bounded_queue(tmp_path):
     gate=threading.Event()
