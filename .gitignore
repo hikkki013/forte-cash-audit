@@ -1,0 +1,17 @@
+.local-audit/
+docx-review-render/
+data/
+datasets/
+models/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.mov
+*.mp4
+*.zip
+.venv/
+.pytest_cache/
+runtime/
+outputs/
+*.egg-info/

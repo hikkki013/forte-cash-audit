@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Кассовый контроль — Forte</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="images/icon.png" type="image/x-icon">
+</head>
+<body>
+
+  <!-- Шапка -->
+  <header class="header">
+    <img class="header__logo" src="images/logo.png" alt="Forte">
+    <div class="header__title">
+      <b>Кассовый контроль</b>
+      <span>Видеоанализ: локальный прототип</span>
+    </div>
+    <div class="badge">Локальный прототип</div>
+  </header>
+
+  <main class="layout">
+
+    <!-- Левая колонка: загрузка видео -->
+    <section class="card">
+      <h2 class="card__title">1. Загрузка видео</h2>
+
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept=".mov,video/quicktime" hidden>
+        <div class="dropzone__icon">🎥</div>
+        <b id="fileName">Перетащите файл .mov или нажмите для выбора</b>
+        <p>Формат .mov, до 50 МБ</p>
+      </label>
+
+      <video class="preview" id="preview" controls muted playsinline></video>
+
+      <button class="btn" id="startBtn" disabled>Запустить анализ</button>
+      <button class="btn btn--secondary is-hidden" id="resetBtn">Проверить другое видео</button>
+
+      <div class="progress" id="progress">
+        <i></i><i></i><i></i>
+      </div>
+      <div class="status" id="status">Выберите видеофайл для проверки</div>
+      <div class="error" id="error"></div>
+
+      <p class="note">
+        Сейчас проверяется оставление банкнот при уходе кассира. Возможны ошибки;
+        другие нарушения не проверяются. Результат требует проверки человеком.
+      </p>
+    </section>
+
+    <!-- Правая колонка: результат -->
+    <section class="card">
+      <h2 class="card__title">2. Результат проверки</h2>
+
+      <!-- Пустое состояние -->
+      <div class="placeholder" id="placeholder">
+        Здесь появятся события, таймкоды и кадры для проверки
+      </div>
+
+      <!-- Идёт анализ -->
+      <div class="loader" id="loader">
+        Идёт анализ видео. Это может занять несколько минут…
+      </div>
+
+      <!-- Готовый результат -->
+      <div class="is-hidden" id="result">
+        <div class="verdict" id="verdict">
+          <span class="verdict__dot"></span>
+          <div>
+            <b id="verdictTitle"></b>
+            <small id="verdictText"></small>
+          </div>
+        </div>
+
+        <div class="timeline is-hidden" id="timelineBlock">
+          <div class="timeline__bar" id="timelineBar"></div>
+          <div class="timeline__scale">
+            <span>0:00</span>
+            <span id="timelineEnd"></span>
+          </div>
+        </div>
+
+        <div id="violations"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Справочник: какие нарушения ищет сервис и на каких правилах это основано -->
+  <section class="catalog" id="catalog">
+    <details class="card">
+      <summary>Что проверяет прототип: возможности и ограничения</summary>
+      <p class="catalog__meta" id="catalogMeta"></p>
+      <p class="note">
+        Сейчас включён один сценарий. Модель может ошибаться, а отсутствие события
+        не означает, что все требования соблюдены. Юридические выводы проверяются отдельно.
+      </p>
+      <div id="catalogList"></div>
+    </details>
+  </section>
+
+  <!-- Увеличенный кадр -->
+  <div class="lightbox" id="lightbox"><img alt="Кадр для ручной проверки"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "forte_training_camera_v1",
+  "expected_aspect": 0.54717,
+  "desk": [0.12, 0.35, 0.80, 0.67],
+  "cashier": [0.34, 0.39, 0.60, 0.55],
+  "client": [0.18, 0.56, 0.87, 0.88],
+  "safe": [0.40, 0.32, 0.67, 0.55],
+  "exit": [0.13, 0.20, 0.30, 0.42],
+  "require_exit": true,
+  "absence_seconds": 3.0,
+  "safe_seconds": 5.0,
+  "sample_seconds": 1.0,
+  "enabled_rules": ["cash_unattended"],
+  "note": "Development calibration for rear-seat cashier layout only. Both prev_client_cash and safe_left_open are experimental and disabled. Thresholds are engineering settings, not legal deadlines."
+}

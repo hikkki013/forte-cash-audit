@@ -1,0 +1,5 @@
+* text=auto
+*.png binary
+*.jpg binary
+# Preserve the exact supplied design bytes checked by tests/frontend.cjs.
+frontend/**/style.css -text
