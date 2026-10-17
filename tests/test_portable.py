@@ -4,6 +4,8 @@ import zipfile
 import pytest
 from scripts.build_portable import source_files, ignore_runtime, archive, refresh_source
 from scripts.portable import configure
+from scripts.split_release import split_archive
+from scripts.refresh_portable_zip import refresh_archive
 
 
 def test_source_bundle_allowlist_excludes_secrets_and_media(tmp_path):
@@ -12,6 +14,37 @@ def test_source_bundle_allowlist_excludes_secrets_and_media(tmp_path):
         p=tmp_path/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text('test')
     names={p.relative_to(tmp_path).as_posix() for p in source_files(tmp_path)}
     assert names=={'README.md','forte/api.py','config/scene.json'}
+
+
+def test_release_parts_reconstruct_archive_and_refuse_overwrite(tmp_path):
+    import hashlib
+    original=tmp_path/'example.zip'; original.write_bytes(b'abcdefg'*10)
+    parts,helper,digest=split_archive(original,tmp_path/'parts',part_size=16)
+    assert b''.join(p.read_bytes() for p in parts)==original.read_bytes()
+    assert digest==hashlib.sha256(original.read_bytes()).hexdigest()
+    command=helper.read_text()
+    assert 'Get-FileHash' in command and digest in command
+    assert 'CreateNew' in command and '1..5' in command
+    with pytest.raises(FileExistsError): split_archive(original,tmp_path/'parts',part_size=16)
+
+
+def test_refresh_zip_preserves_runtime_replaces_docs_and_has_no_duplicates(tmp_path):
+    folder=tmp_path/'Forte'; folder.mkdir()
+    manifest={'source_sha256':{'README.md':'example'}}
+    old=tmp_path/'old.zip'; target=tmp_path/'new.zip'
+    with zipfile.ZipFile(old,'w',compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr('Forte/README.md','old')
+        z.writestr('Forte/BUILD.json',json.dumps(manifest))
+        z.writestr('Forte/python/runtime.bin',b'abc'*10000)
+    (folder/'BUILD.json').write_text(json.dumps(manifest))
+    (folder/'README.md').write_text('updated')
+    refresh_archive(old,folder,target)
+    with zipfile.ZipFile(target) as z:
+        assert z.read('Forte/README.md')==b'updated'
+        assert z.read('Forte/python/runtime.bin')==b'abc'*10000
+        assert len(z.namelist())==3
+        assert z.testzip() is None
+    with pytest.raises(FileExistsError): refresh_archive(old,folder,target)
 
 
 def test_runtime_keeps_dlls_and_licenses_not_cpp_build_files():

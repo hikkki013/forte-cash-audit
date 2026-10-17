@@ -14,7 +14,7 @@
 
 ### Рекомендуемый путь: готовый пакет, без установки программ
 
-Откройте [Releases v0.2.0](https://github.com/hikkki013/forte-cash-audit/releases/tag/v0.2.0), скачайте **Forte-Windows-v0.2.0.zip** и полностью распакуйте его. Не выбирайте Source code (zip). Запустите по очереди `Check-Forte.cmd` и `Start-Forte.cmd`; браузер откроется автоматически. Затем переходите к разделу 3 этой инструкции. Python, Git, Node.js, FFmpeg и CUDA Toolkit устанавливать не нужно: всё необходимое для приложения уже внутри. Для автотестов — `Test-Forte.cmd`.
+Откройте [Releases v0.2.0](https://github.com/hikkki013/forte-cash-audit/releases/tag/v0.2.0). Скачайте **Forte-Windows-v0.2.0.zip.part01**, **Forte-Windows-v0.2.0.zip.part02** и **Assemble-Forte.cmd** в одну папку. Запустите `Assemble-Forte.cmd`, дождитесь `CHECKSUM OK`; появится обычный ZIP. Правой кнопкой по нему → «Извлечь всё». Не выбирайте Source code (zip). В распакованной папке запустите по очереди `Check-Forte.cmd` и `Start-Forte.cmd`; браузер откроется автоматически. Затем переходите к разделу 3 этой инструкции. Python, Git, Node.js, FFmpeg и CUDA Toolkit устанавливать не нужно: всё необходимое для приложения уже внутри. Для автотестов — `Test-Forte.cmd`.
 
 Нужны Windows x64, браузер, свободное место и, для проверенной скорости, NVIDIA с совместимым установленным драйвером. Это не обещание работы на любой конфигурации. Полные требования, запуск офлайн и ограничения переносимости — [PORTABLE.md](PORTABLE.md). Запишите версию и контрольные суммы из `BUILD.json` в протокол.
 
