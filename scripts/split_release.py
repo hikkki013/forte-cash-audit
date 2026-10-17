@@ -38,10 +38,12 @@ def split_archive(archive, destination, part_size=1800 * 1024 * 1024):
         "Write-Host 'Assembling ZIP. Please wait...'; "
         "$out=[IO.File]::Open($name,[IO.FileMode]::CreateNew); "
         "try {foreach($p in $parts){$inputFile=[IO.File]::OpenRead($p); try{$inputFile.CopyTo($out)}finally{$inputFile.Dispose()}}}finally{$out.Dispose()}; "
-        f"if((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash -ne '{expected}'){{throw 'Checksum mismatch. Do not use this ZIP.'}}; "
+        "$hasher=[Security.Cryptography.SHA256]::Create(); $checkFile=[IO.File]::OpenRead($name); "
+        "try{$actual=[BitConverter]::ToString($hasher.ComputeHash($checkFile)).Replace('-','').ToLowerInvariant()}finally{$checkFile.Dispose(); $hasher.Dispose()}; "
+        f"if($actual -ne '{expected}'){{throw 'Checksum mismatch. Do not use this ZIP.'}}; "
         "Write-Host 'CHECKSUM OK. Right-click the ZIP, Extract All, then open Start-Forte.cmd in the extracted folder.'")
     # A quoted CMD %~dp0 handles spaces; PowerShell resolves literal fixed filenames.
-    text='@echo off\r\ncd /d "%~dp0"\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "'+ps+'"\r\npause\r\n'
+    text='@echo off\r\ncd /d "%~dp0"\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "'+ps+'"\r\nif errorlevel 1 (\r\n echo Assembly failed. Read the error above.\r\n pause\r\n exit /b 1\r\n)\r\npause\r\n'
     helper.write_bytes(text.encode('ascii'))
     (destination/(archive.name+'.sha256')).write_text(expected+'  '+archive.name+'\n',encoding='ascii')
     return parts,helper,expected

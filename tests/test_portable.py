@@ -23,7 +23,7 @@ def test_release_parts_reconstruct_archive_and_refuse_overwrite(tmp_path):
     assert b''.join(p.read_bytes() for p in parts)==original.read_bytes()
     assert digest==hashlib.sha256(original.read_bytes()).hexdigest()
     command=helper.read_text()
-    assert 'Get-FileHash' in command and digest in command
+    assert '[Security.Cryptography.SHA256]::Create()' in command and digest in command
     assert 'CreateNew' in command and '1..5' in command
     with pytest.raises(FileExistsError): split_archive(original,tmp_path/'parts',part_size=16)
 
