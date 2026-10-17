@@ -8,12 +8,14 @@ import copy
 import json
 from pathlib import Path
 import zipfile
-from scripts.build_portable import sha256
+from scripts.build_portable import sha256, archive_files
 
 
 def refresh_archive(original, folder, target):
     manifest=json.loads((folder/'BUILD.json').read_text(encoding='utf-8'))
     prefix=folder.name+'/'
+    desired={p.relative_to(folder).as_posix() for p in archive_files(folder)}
+    preserved=set()
     with zipfile.ZipFile(original) as old:
         previous=json.loads(old.read(prefix+'BUILD.json'))
         replace=set(previous['source_sha256']) | set(manifest['source_sha256']) | {'BUILD.json'}
@@ -22,7 +24,8 @@ def refresh_archive(original, folder, target):
             for index,info in enumerate(infos):
                 if not info.filename.startswith(prefix) or info.flag_bits & 1:
                     raise ValueError('Unexpected archive layout/encryption')
-                if info.filename[len(prefix):] in replace: continue
+                relative=info.filename[len(prefix):]
+                if relative in replace or relative not in desired: continue
                 end=infos[index+1].header_offset if index+1<len(infos) else old.start_dir
                 length=end-info.header_offset
                 if length<=0: raise ValueError('Nonsequential ZIP')
@@ -34,7 +37,8 @@ def refresh_archive(original, folder, target):
                     new.fp.write(block); length-=len(block)
                 new.filelist.append(entry); new.NameToInfo[entry.filename]=entry
                 new.start_dir=new.fp.tell(); new._didModify=True
-            for name in sorted(set(manifest['source_sha256']) | {'BUILD.json'}):
+                preserved.add(relative)
+            for name in sorted(desired-preserved):
                 new.write(folder/name,prefix+name)
     with zipfile.ZipFile(target) as check:
         if len(check.namelist())!=len(set(check.namelist())): raise ValueError('Duplicate ZIP entries')

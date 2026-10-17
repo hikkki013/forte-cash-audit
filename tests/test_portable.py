@@ -38,11 +38,18 @@ def test_refresh_zip_preserves_runtime_replaces_docs_and_has_no_duplicates(tmp_p
         z.writestr('Forte/python/runtime.bin',b'abc'*10000)
     (folder/'BUILD.json').write_text(json.dumps(manifest))
     (folder/'README.md').write_text('updated')
+    (folder/'python').mkdir()
+    (folder/'python/runtime.bin').write_bytes(b'abc'*10000)
+    (folder/'python/runtime').mkdir()
+    (folder/'python/runtime/required.py').write_text('required dependency')
+    (folder/'runtime').mkdir()
+    (folder/'runtime/api-key.txt').write_text('must not ship')
     refresh_archive(old,folder,target)
     with zipfile.ZipFile(target) as z:
         assert z.read('Forte/README.md')==b'updated'
         assert z.read('Forte/python/runtime.bin')==b'abc'*10000
-        assert len(z.namelist())==3
+        assert z.read('Forte/python/runtime/required.py')==b'required dependency'
+        assert len(z.namelist())==4
         assert z.testzip() is None
     with pytest.raises(FileExistsError): refresh_archive(old,folder,target)
 
@@ -54,12 +61,12 @@ def test_runtime_keeps_dlls_and_licenses_not_cpp_build_files():
 
 def test_archive_never_contains_test_run_secrets(tmp_path):
     root=tmp_path/'Forte'
-    for name in ['Start-Forte.cmd','python/python.exe','runtime/api-key.txt','outputs/result.json','tests/__pycache__/x.pyc']:
+    for name in ['Start-Forte.cmd','python/python.exe','python/Lib/site-packages/torch/_inductor/runtime/hints.py','runtime/api-key.txt','outputs/result.json','tests/__pycache__/x.pyc']:
         p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text('test')
     target=tmp_path/'Forte.zip'
     archive(root,target)
     with zipfile.ZipFile(target) as z:
-        assert set(z.namelist())=={'Forte/Start-Forte.cmd','Forte/python/python.exe'}
+        assert set(z.namelist())=={'Forte/Start-Forte.cmd','Forte/python/python.exe','Forte/python/Lib/site-packages/torch/_inductor/runtime/hints.py'}
     with pytest.raises(FileExistsError): archive(root,target)
 
 

@@ -99,10 +99,17 @@ def build(destination,python_home,site_packages,crt,ms_licenses):
     print('Build ready:',destination,flush=True)
 
 
+def archive_files(folder):
+    # Only the application's TOP-LEVEL runtime/outputs contain user data.
+    # torch/_inductor/runtime is a required library, not our runtime directory.
+    return sorted(p for p in folder.rglob('*') if p.is_file()
+                  and p.relative_to(folder).parts[0] not in {'runtime','outputs'}
+                  and not set(p.relative_to(folder).parts)&{'__pycache__','.pytest_cache'})
+
+
 def archive(folder,target):
     if target.exists(): raise FileExistsError(target)
-    files=sorted(p for p in folder.rglob('*') if p.is_file()
-                 and not set(p.relative_to(folder).parts)&{'runtime','outputs','__pycache__','.pytest_cache'})
+    files=archive_files(folder)
     with zipfile.ZipFile(target,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=6,allowZip64=True) as out:
         for i,path in enumerate(files):
             out.write(path,Path(folder.name)/path.relative_to(folder))
