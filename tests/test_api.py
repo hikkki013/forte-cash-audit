@@ -1,5 +1,6 @@
 import threading
 import time
+import json
 from fastapi.testclient import TestClient
 from forte.api import create_app
 
@@ -76,3 +77,19 @@ def test_bounded_queue(tmp_path):
             assert codes==[202,202,429]
         finally:
             gate.set()
+
+
+def test_jury_mode_requires_header_and_writes_minimal_audit(tmp_path, monkeypatch):
+    audit = tmp_path / "jury-audit.jsonl"
+    monkeypatch.setenv("FORTE_API_KEY_ONLY", "1")
+    monkeypatch.setenv("FORTE_AUDIT_LOG", str(audit))
+    with TestClient(create_app(FakeAnalyzer(), "test", tmp_path)) as c:
+        assert c.post('/api/v1/analyze', files={"file":("private-name.mov",b"video")}).status_code == 401
+        accepted = c.post('/api/v1/analyze', headers={"X-API-Key":"test"},
+                          files={"file":("private-name.mov",b"video")})
+        assert accepted.status_code == 202
+        assert poll(c, accepted.json()["job_id"])["status"] == "done"
+    rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in rows] == ["accepted", "finished"]
+    assert rows[-1]["status"] == "done"
+    assert "private-name.mov" not in audit.read_text(encoding="utf-8")

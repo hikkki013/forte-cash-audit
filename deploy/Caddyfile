@@ -1,0 +1,5 @@
+{$FORTE_JURY_DOMAIN} {
+	# Caddy accepts HTTPS from the public network and keeps Forte itself on
+	# loopback, so port 8000 is never exposed directly.
+	reverse_proxy 127.0.0.1:8000
+}

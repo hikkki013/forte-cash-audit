@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import copy
+from datetime import datetime, timezone
 import hmac
 import json
 import os
@@ -33,8 +34,10 @@ class JobResponse(BaseModel):
 
 def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*1024):
     secret = api_key if api_key is not None else os.environ.get("FORTE_API_KEY", "")
+    api_key_only = os.environ.get("FORTE_API_KEY_ONLY", "").strip().lower() in {"1", "true", "yes"}
+    audit_log = os.environ.get("FORTE_AUDIT_LOG", "").strip()
     root = Path(upload_dir or "runtime/uploads").resolve()
-    jobs, guard = {}, threading.Lock()
+    jobs, guard, audit_guard = {}, threading.Lock(), threading.Lock()
     slots = threading.BoundedSemaphore(2)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="forte-gpu")
     state = {"analyzer":analyzer, "load_error":None}
@@ -42,6 +45,21 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
     ui_root = Path(__file__).resolve().parent.parent / "frontend"
     variants = {"with-rules":"forte_с_правилами", "simple":"forte_без_правил"}
     assets = {"app.js", "style.css", "rules.json", "images/logo.png", "images/icon.png"}
+
+    def audit(job_id: str, event: str, **details):
+        """Append minimal operational evidence without recording video data or names."""
+        if not audit_log:
+            return
+        row = {"at": datetime.now(timezone.utc).isoformat(), "job_id": job_id, "event": event, **details}
+        target = Path(audit_log).resolve()
+        try:
+            with audit_guard:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError:
+            # Operational logging must not turn a completed analysis into a failed job.
+            return
 
     @asynccontextmanager
     async def lifespan(app):
@@ -66,17 +84,19 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
             raise HTTPException(403, "Open the UI on this computer at http://127.0.0.1:8000")
 
     def auth(request: Request, x_api_key: str | None = Header(default=None)):
-        # An explicit key also works in Swagger when the browser has a UI cookie.
+        # Jury mode deliberately disables the browser-cookie exception: every API
+        # call must include the key required by the published contract.
         if x_api_key is not None:
             if not secret:
                 raise HTTPException(503,"Set FORTE_API_KEY before starting the server")
             if not hmac.compare_digest(x_api_key.encode(),secret.encode()):
                 raise HTTPException(401,"Invalid API key")
             return
-        cookie = request.cookies.get("forte_local_session", "")
-        if cookie and hmac.compare_digest(cookie.encode(), ui_session.encode()):
-            local_browser(request)
-            return
+        if not api_key_only:
+            cookie = request.cookies.get("forte_local_session", "")
+            if cookie and hmac.compare_digest(cookie.encode(), ui_session.encode()):
+                local_browser(request)
+                return
         if not secret:
             raise HTTPException(503,"Set FORTE_API_KEY before starting the server")
         if not x_api_key or not hmac.compare_digest(x_api_key.encode(),secret.encode()):
@@ -114,6 +134,14 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
             del jobs[key]
 
     def work(job_id, path, deadline):
+        started = time.monotonic()
+
+        def finish(status, *, result=None, error=None):
+            with guard:
+                jobs[job_id].update(status=status, result=result, error=error)
+            audit(job_id, "finished", status=status, error=error,
+                  processing_sec=round(time.monotonic()-started, 2))
+
         try:
             if time.monotonic() >= deadline:
                 raise TimeoutError("Queue wait exhausted processing budget")
@@ -126,11 +154,9 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
                 raise TimeoutError("Analysis exceeded processing budget")
             # Per-frame diagnostics are local CLI output, not the frontend payload.
             result = {k:v for k,v in result.items() if k != "observations"}
-            with guard:
-                jobs[job_id].update(status="done",result=result)
+            finish("done", result=result)
         except TimeoutError:
-            with guard:
-                jobs[job_id].update(status="failed",error="analysis_timeout")
+            finish("failed", error="analysis_timeout")
         except (ValueError, FileNotFoundError) as exc:
             safe_errors = {
                 "Unsupported camera aspect. Configure scene zones for this camera.",
@@ -139,12 +165,10 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
             }
             # Decoder exceptions may include the private upload path.
             message = str(exc) if str(exc) in safe_errors else "invalid_video_or_configuration"
-            with guard:
-                jobs[job_id].update(status="failed",error=message)
+            finish("failed", error=message)
         except Exception:
             # Do not leak paths, tokens or internal exceptions over the API.
-            with guard:
-                jobs[job_id].update(status="failed",error="analysis_failed")
+            finish("failed", error="analysis_failed")
         finally:
             try:
                 path.unlink(missing_ok=True)  # Only the UUID upload copy, never originals.
@@ -193,6 +217,7 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
                 cleanup()
                 jobs[job_id] = {"job_id":job_id,"status":"processing","created":created,"result":None,"error":None}
             pool.submit(work,job_id,path,created+240)
+            audit(job_id, "accepted")
             submitted = True
             return {"job_id":job_id}
         finally:
