@@ -20,7 +20,7 @@ def test_web_assets_and_no_source_exposure(tmp_path):
                 assert c.get(f'/ui/{variant}/{path}').status_code==404
         assert 'secret-test' not in c.get('/ui/with-rules/app.js').text
         rules=c.get('/api/v1/rules').json()['rules']
-        assert len(rules)==33 and sum(r['mode']=='automatic_candidate' for r in rules)==16
+        assert len(rules)==33 and sum(r['mode']=='automatic_candidate' for r in rules)==20
         bag=next(r for r in rules if r['id']=='bag_left_by_visitor')
         assert bag['source_text_verified'] and not bag['source_verified']
         assert 'нарушением целостности' in bag['applicability']

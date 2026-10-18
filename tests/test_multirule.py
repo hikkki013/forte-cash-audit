@@ -52,12 +52,12 @@ def test_unknown_state_and_missing_frames_never_mean_closed_or_persistence():
 
 
 def test_every_source_rule_has_a_status_and_manual_is_not_passed():
-    assert len(CATALOG)==33 and len(CFG['enabled_rules'])==16
+    assert len(CATALOG)==33 and len(CFG['enabled_rules'])==20
     checks=rule_checks(CATALOG,CFG['enabled_rules'],[],{},10)
     assert len(checks)==33 and len({c['rule_id'] for c in checks})==33
     assert all(c['status'] in {'not_implemented','insufficient_evidence'} for c in checks)
     assert next(c for c in checks if c['rule_id']=='pc_not_shutdown')['status']=='insufficient_evidence'
-    assert next(c for c in checks if c['rule_id']=='no_client_id')['status']=='not_implemented'
+    assert next(c for c in checks if c['rule_id']=='no_client_id')['status']=='insufficient_evidence'
     assert next(c for c in checks if c['rule_id']=='cash_foreign_object')['status']=='not_implemented'
     short=rule_checks(CATALOG,CFG['enabled_rules'],[],dict.fromkeys(CATALOG,3),3)
     assert next(c for c in short if c['rule_id']=='food_at_workplace')['status']=='insufficient_evidence'

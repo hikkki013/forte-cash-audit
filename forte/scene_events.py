@@ -2,10 +2,17 @@
 from forte.rules import iou
 
 
-def distinct_people(people):
+def object_overlap(box, person):
+    """Fraction of an object's box intersecting a person's box, not hand pose."""
+    a=person['box']
+    overlap=max(0,min(box[2],a[2])-max(box[0],a[0]))*max(0,min(box[3],a[3])-max(box[1],a[1]))
+    return overlap/max(1,(box[2]-box[0])*(box[3]-box[1]))
+
+
+def distinct_people(people, min_score=.45):
     selected=[]
     for p in sorted(people,key=lambda d:d['score'],reverse=True):
-        if p['score'] < .45:
+        if p['score'] < min_score:
             continue
         a=p['box']
         area=max(1,(a[2]-a[0])*(a[3]-a[1]))
@@ -82,13 +89,22 @@ class SceneEvents:
             return events
         if at_exit: self.exit_until=t+6
         self.staff_seen |= bool(staff)
-        # Match stationary items, never infer their contents from the bag class.
+        # Expire before matching: a late box cannot revive an interrupted transfer.
+        self.tracks=[tr for tr in self.tracks if t-tr['last']<=2*self.config['sample_seconds']]
+        # Match items, never infer their contents from the bag class.
         observed=[]
         for d in objects:
             if d['label'] not in {'bag','cash'} or d['score'] < (.30 if d['label']=='bag' else .25):
                 continue
             b=d['box']; bw=(b[2]-b[0])/self.width; bh=(b[3]-b[1])/self.height
             if not (.015<bw<.28 and .006<bh<.20): continue
+            if d['label']=='bag' and self.config.get('desk'):
+                z=self.config['desk']
+                # A clipped fragment of a counting machine can look like a bag.
+                # It cannot establish the presence of a complete transferable item.
+                if not (z[0]+.006 < b[0]/self.width < b[2]/self.width < z[2]-.006
+                        and z[1]+.003 < b[1]/self.height < b[3]/self.height < z[3]-.003):
+                    continue
             match=next((tr for tr in self.tracks if tr['label']==d['label'] and iou(tr['box'],b)>=.40),None)
             if match is None and d['label']=='cash':
                 # Short, bounded displacement of a unique bundle. Ambiguous
@@ -99,23 +115,39 @@ class SceneEvents:
                 if len(nearby)==1: match=nearby[0]
             if match is None:
                 match={'label':d['label'],'box':b,'first':t,'hits':0,'with_visitor':False,'with_staff':False,
-                       'appeared_with_visitor':bool(visitors)}
+                       'appeared_with_visitor':bool(visitors), 'first_box':list(b),
+                       'visitor_contact_at':None,'visitor_contact_hits':0,
+                       'staff_after_visitor_hits':0,'moved':False}
                 self.tracks.append(match)
             elif any(match is item for item in observed):
                 continue
             match['last']=t; match['hits']+=1
-            if d['label']=='cash': match['box']=b
+            match['box']=b
             match['with_visitor'] |= bool(visitors)
             cx,cy=(b[0]+b[2])/2,(b[1]+b[3])/2
             # A permanently visible desk phone mislabelled as a bag is not
             # evidence that the employee handled a bag. Require spatial contact.
             match['with_staff'] |= any(p['box'][0]<=cx<=p['box'][2] and
                                       p['box'][1]<=cy<=p['box'][3] for p in staff)
+            if d['label']=='bag':
+                initial=match['first_box']
+                match['moved'] |= bool(visitors) and max(abs(cx-(initial[0]+initial[2])/2)/self.width,
+                                      abs(cy-(initial[1]+initial[3])/2)/self.height)>=.025
+                # Co-presence is NOT a transfer. Require repeated spatial contact
+                # with the visitor, then with staff, plus measurable movement.
+                if any(object_overlap(b,p)>=.20 for p in visitors):
+                    match['visitor_contact_hits']+=1
+                    if match['visitor_contact_at'] is None:
+                        match['visitor_contact_at']=t
+                if (visitors and match['visitor_contact_at'] is not None and t>match['visitor_contact_at']
+                        and any(object_overlap(b,p)>=.20 for p in staff)):
+                    match['staff_after_visitor_hits']+=1
             observed.append(match)
         self.tracks=[tr for tr in self.tracks if t-tr['last']<=2*self.config['sample_seconds']]
         bags=[tr for tr in observed if tr['label']=='bag' and tr['hits']>=3 and t-tr['first']>=2]
         staff_bags=[tr for tr in bags if tr['with_staff']]
-        visitor_bags=[tr for tr in bags if tr['with_visitor'] and tr['appeared_with_visitor']]
+        visitor_bags=[tr for tr in bags if tr['appeared_with_visitor'] and tr['moved']
+                      and tr['visitor_contact_hits']>=2 and tr['staff_after_visitor_hits']>=2]
         self._window('bag_left_by_employee',t,bool(staff_bags) and self.staff_seen and not staff
                      and not visitors and t<=self.exit_until,3,events,
                      staff_bags[0]['first'] if staff_bags else None)

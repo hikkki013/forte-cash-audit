@@ -49,7 +49,7 @@ def create_app(analyzer=None, api_key=None, upload_dir=None, max_bytes=200*1024*
         yield
         pool.shutdown(wait=True, cancel_futures=False)
 
-    app = FastAPI(title="Forte local prototype", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Forte local prototype", version="0.3.0", lifespan=lifespan)
     origins = [x.strip() for x in os.environ.get("FORTE_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
     app.add_middleware(CORSMiddleware,allow_origins=origins,allow_methods=["GET","POST"],allow_headers=["X-API-Key","Content-Type"])
 

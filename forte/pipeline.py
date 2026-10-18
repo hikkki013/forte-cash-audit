@@ -16,6 +16,9 @@ from forte.safe_state import calibrated_safe_state
 from forte.rule_metadata import rule_metadata
 from forte.key_state import key_state, lock_occupied, KeyLeftTracker
 from forte.desk_clear import DeskClearTracker, desk_materials, LABELS as DESK_LABELS, ITEM_NAMES
+from forte.identification import IdentificationTracker, DOCUMENT_LABELS
+from forte.cash_check import CashCheckTracker, EQUIPMENT_LABELS
+from forte.access_checks import door_state, RearEntryTracker, ClientDepartureTracker
 
 def in_zone(box, zone, width, height):
     x, y = (box[0]+box[2])/2/width, (box[1]+box[3])/2/height
@@ -56,6 +59,30 @@ def evidence(t, image):
     return {"timestamp_sec":t, "image_base64":base64.b64encode(buf.getvalue()).decode("ascii")}
 
 
+def rendered_event(event, rule, frames):
+    selected = []
+    for target in event.get('evidence_times', [max(0,event['timecode_sec']-1),
+                                              event['timecode_sec'],event['confirmed_at']]):
+        chosen = min(frames,key=lambda p:abs(p[0]-target))
+        if all(x[0]!=chosen[0] for x in selected):
+            selected.append(chosen)
+    description = rule['description'] + ' ' + rule['limits']
+    if event['rule_id']=='desk_materials_left':
+        names=', '.join(ITEM_NAMES[k] for k in event['detected_items'])
+        description=f'После ухода сотрудника на столе остались: {names}. ' + rule['limits']
+    if event['rule_id']=='pc_not_shutdown':
+        description = (f"После ухода сотрудника из рабочей зоны экран оставался визуально активным "
+            f"не менее {event['duration_sec']:g} с; наблюдалось движение человека в зоне выхода. "
+            "Это признак возможного оставления компьютера активным без присмотра. " + rule['limits'])
+    result = {'type':rule['event_title'],'rule_id':event['rule_id'],'title':rule['event_title'],
+              'timecode_sec':event['timecode_sec'],'confirmed_at_sec':event['confirmed_at'],
+              'review_required':True,'classification':'visual_candidate',**rule_metadata(rule),
+              'description':description,'evidence_frames':[evidence(ts,im) for ts,im in selected]}
+    if 'detected_items' in event:
+        result['detected_items']=event['detected_items']
+    return result
+
+
 class Pipeline:
     def __init__(self, detector, config_path="config/scene.json", rules_path="config/rules.json"):
         self.detector = detector
@@ -67,6 +94,9 @@ class Pipeline:
         key_name=self.config.get('key_calibration')
         key_path=Path(config_path).parent/key_name if key_name else None
         self.key_calibration=json.loads(key_path.read_text(encoding='utf-8')) if key_path and key_path.is_file() else None
+        door_name=self.config.get('door_calibration')
+        door_path=Path(config_path).parent/door_name if door_name else None
+        self.door_calibration=json.loads(door_path.read_text(encoding='utf-8')) if door_path and door_path.is_file() else None
         unknown = set(self.config["enabled_rules"]) - set(self.catalog)
         if unknown:
             raise ValueError("Unknown configured rules")
@@ -82,6 +112,13 @@ class Pipeline:
         key_tracker = KeyLeftTracker(self.config['sample_seconds'])
         ring = deque(maxlen=32)
         cash_return = CashReturnTracker(self.config)
+        identification = IdentificationTracker(self.config)
+        identity_frames = {}
+        cash_check = CashCheckTracker(self.config)
+        cash_check_frames = {}
+        rear_entry=RearEntryTracker(self.config['sample_seconds'])
+        departure=ClientDepartureTracker(self.config)
+        departure_frames={}
         events, frames, observations = [], 0, []
         observable = Counter()
         enabled = set(self.config["enabled_rules"])
@@ -113,6 +150,25 @@ class Pipeline:
             cashiers = [d for d in people if in_zone(d["box"],self.config["cashier"],width,height)]
             clients = [d for d in people if d not in cashiers and in_zone(d["box"],self.config["client"],width,height)]
             scene_staff,scene_clients,scene_exit=scene_events.roles(t,people,width,height)
+            door_details=door_state(image,self.door_calibration,people,degraded)
+            door = door_details['open'] if self.door_calibration else state_in_zone(states,"door",self.config.get("door",self.config["exit"]),width,height)
+            rear_events=[]
+            if 'outsider_in_cashroom' in enabled:
+                rear_events=rear_entry.update(t,people,width,height,scene_events.front,degraded,door)
+            check_equipment,check_hands=[],[]
+            if 'no_count_check' in enabled:
+                if not degraded and people and not scene_events.front:
+                    check_equipment=cropped_detections(self.detector,image,
+                        self.config.get('cash_check_search',[.18,.33,.72,.54]),EQUIPMENT_LABELS)
+                    if any(d['label']=='cash_counter' for d in check_equipment):
+                        check_hands=cropped_detections(self.detector,image,
+                            self.config.get('cash_check_hands',[.27,.34,.67,.52]),['hand'])
+                cash_check.update(t,people,check_equipment,check_hands,width,height,
+                                  degraded,scene_events.front)
+                if t in cash_check.evidence_times:
+                    cash_check_frames[t]=image.copy()
+                cash_check_frames={ts:im for ts,im in cash_check_frames.items()
+                                   if ts in cash_check.evidence_times}
             material_rows=[]
             materials=[]
             material_events=[]
@@ -125,7 +181,7 @@ class Pipeline:
             if scene_events.front:
                 cashiers,clients=scene_staff,scene_clients
             detail_cash=[]
-            if not degraded and scene_events.front and 'prev_client_cash' in enabled:
+            if not degraded and scene_events.front and enabled & {'prev_client_cash','count_without_client'}:
                 zone=self.config.get('cash_continuity_search',[.20,.46,.58,.57])
                 detail_cash=cropped_detections(self.detector,image,zone,['cash'])
                 # Clipped counting machines and crop borders are not banknotes.
@@ -134,6 +190,17 @@ class Pipeline:
                     d['box'][1]/height>zone[1]+.003 and d['box'][3]/height<zone[3]-.003 and
                     (d['box'][3]-d['box'][1])/height<.06]
             cash = [d for d in objects if d["label"]=="cash"]
+            departure_events=[]
+            departure_equipment,departure_hands=[],[]
+            if 'count_without_client' in enabled:
+                if departure.prepare(t,people,detail_cash,width,height,scene_events.front,scene_exit,degraded):
+                    dz=self.config.get('departure_search',[.18,.33,.78,.60])
+                    departure_equipment=cropped_detections(self.detector,image,dz,['cash_counter'])
+                    departure_hands=cropped_detections(self.detector,image,dz,['hand'])
+                    departure_events=departure.update_action(t,departure_equipment,departure_hands,width,height)
+                if t in departure.evidence_times:
+                    departure_frames[t]=image.copy()
+                departure_frames={ts:im for ts,im in departure_frames.items() if ts in departure.evidence_times}
             money = max(cash,key=lambda d:d["score"],default=None)
             def at_cashier(d):
                 return (d["score"] >= .35 and any(center_inside(d["box"],p["box"]) for p in cashiers)
@@ -149,7 +216,6 @@ class Pipeline:
                 safe_states=[d for d in states if (d['box'][2]-d['box'][0])/width<.32 and
                              (d['box'][3]-d['box'][1])/height<.25]
                 safe = state_in_zone(safe_states,"safe",self.config["safe"],width,height)
-            door = state_in_zone(states,"door",self.config.get("door",self.config["exit"]),width,height)
             screen = screen_state(image,screens)
             return_detections=[]
             return_events=[]
@@ -160,6 +226,19 @@ class Pipeline:
                     return_detections=cropped_detections(self.detector,image,
                         self.config.get('cash_return_search',[.20,.44,.52,.59]),['cash'])
                     return_events=cash_return.update(t,return_detections)
+            identity_events, identity_rows = [], []
+            identity_cash = []
+            if 'no_client_id' in enabled:
+                if not degraded and people:
+                    identity_rows = cropped_detections(self.detector,image,
+                        self.config.get('identity_search',[.18,.36,.68,.60]),DOCUMENT_LABELS)
+                    # Reuse the exact same localized cash query when it already ran.
+                    identity_cash = return_detections if return_observable else cropped_detections(
+                        self.detector,image,self.config.get('cash_return_search',[.20,.44,.52,.59]),['cash'])
+                identity_events = identification.update(t,people,identity_cash,identity_rows,
+                                                         width,height,degraded)
+                if t in identification.evidence_times:
+                    identity_frames[t] = image.copy()
             o = Observation(t,bool(cashiers),bool(clients),bool(money),safe,
                 any(in_zone(d["box"],self.config["safe"],width,height) for d in people),
                 money["box"] if money else None,
@@ -171,7 +250,7 @@ class Pipeline:
                 o.person_near_safe |= any(d['score']>=.45 and d['box'][1]/height<.30 and
                     d['box'][2]/width>z[0] and d['box'][0]/width<z[2] and d['box'][3]/height>z[1]
                     for d in people)
-            for key in enabled-{"camera_obstructed","safe_left_open","door_open","pc_not_shutdown","possible_incomplete_cash_return","several_clients","desk_materials_left","key_left_in_lock"}:
+            for key in enabled-{"camera_obstructed","safe_left_open","door_open","pc_not_shutdown","possible_incomplete_cash_return","several_clients","desk_materials_left","key_left_in_lock","no_client_id","no_count_check","outsider_in_cashroom","count_without_client"}:
                 observable[key] += bool(people) and not degraded
             observable["safe_left_open"] += safe is not None
             observable["door_open"] += door is not None
@@ -204,32 +283,37 @@ class Pipeline:
                                      'cash_continuity_detections':detail_cash,
                                      'safe_calibration':safe_details})
             observations[-1]['key_state']=key_details
+            observations[-1]['identification']={'state':identification.state,
+                'document_detections':identity_rows,'cash_detections':identity_cash}
+            observations[-1]['cash_check']={'state':cash_check.state,
+                'equipment_detections':check_equipment,'hand_detections':check_hands,
+                'manual_recount':'not_implemented'}
+            observations[-1]['door_calibration']=door_details
+            observations[-1]['departure_check']={'equipment':departure_equipment,'hands':departure_hands,
+                'cash_hits':departure.cash_hits,'absent_since':departure.absent,'exit_at':departure.exit_at}
             ring.append((t,image.copy()))
-            for event in engine.update(o)+return_events+scene_candidates+material_events+key_events:
-                rule = self.catalog[event["rule_id"]]
-                selected = []
-                for target in event.get('evidence_times',[max(0,event["timecode_sec"]-1),event["timecode_sec"],t]):
-                    chosen = min(ring,key=lambda p:abs(p[0]-target))
-                    if all(x[0]!=chosen[0] for x in selected):
-                        selected.append(chosen)
-                description = rule["description"] + " " + rule["limits"]
-                if event['rule_id']=='desk_materials_left':
-                    names=', '.join(ITEM_NAMES[k] for k in event['detected_items'])
-                    description=f'После ухода сотрудника на столе остались: {names}. ' + rule['limits']
-                if event['rule_id'] == 'pc_not_shutdown':
-                    description = (f"После ухода сотрудника из рабочей зоны экран оставался визуально активным "
-                        f"не менее {event['duration_sec']:g} с; наблюдалось движение человека в зоне выхода. "
-                        "Это признак возможного оставления компьютера активным без присмотра. " + rule['limits'])
-                events.append({"type":rule["event_title"],"rule_id":event["rule_id"],
-                    "title":rule["event_title"],"timecode_sec":event["timecode_sec"],
-                    "confirmed_at_sec":event["confirmed_at"],"review_required":True,
-                    "classification":"visual_candidate",**rule_metadata(rule),
-                    "description":description,"evidence_frames":[evidence(ts,im) for ts,im in selected]})
-                if 'detected_items' in event:
-                    events[-1]['detected_items']=event['detected_items']
+            for event in engine.update(o)+return_events+scene_candidates+material_events+key_events+rear_events:
+                events.append(rendered_event(event,self.catalog[event['rule_id']],ring))
+            for event in identity_events:
+                events.append(rendered_event(event,self.catalog['no_client_id'],list(identity_frames.items())))
+            for event in departure_events:
+                events.append(rendered_event(event,self.catalog['count_without_client'],list(departure_frames.items())))
+            # Keep at most three exact original frames, including in long visits.
+            identity_frames = {ts:im for ts,im in identity_frames.items() if ts in identification.evidence_times}
             frames += 1
         if not frames:
             raise ValueError("Video has no decodable timestamped frames")
+        if 'no_client_id' in enabled:
+            for event in identification.finish():
+                events.append(rendered_event(event,self.catalog['no_client_id'],list(identity_frames.items())))
+            observable['no_client_id'] = frames if identification.observable else 0
+        if 'no_count_check' in enabled:
+            for event in cash_check.finish():
+                events.append(rendered_event(event,self.catalog['no_count_check'],list(cash_check_frames.items())))
+            observable['no_count_check'] = frames if cash_check.observable else 0
+        events.sort(key=lambda e:e['timecode_sec'])
+        observable['outsider_in_cashroom']=rear_entry.observable
+        observable['count_without_client']=departure.observable
         checks = rule_checks(self.catalog,enabled,events,observable,frames,self.config["sample_seconds"])
         unresolved = sum(c["status"] in {"not_implemented","insufficient_evidence","disabled"} for c in checks)
         # The task specification requires a binary detection verdict, not a

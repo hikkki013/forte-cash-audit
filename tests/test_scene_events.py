@@ -12,7 +12,7 @@ FRONT=person([300,480,600,780])
 BACK=person([250,360,550,540])
 VISITOR=person([200,260,400,490])
 SECOND=person([60,180,200,480])
-def obj(label='bag',dx=0): return {'label':label,'box':[300+dx,440,380+dx,480],'score':.8}
+def obj(label='bag',dx=0,dy=0): return {'label':label,'box':[300+dx,440+dy,380+dx,480+dy],'score':.8}
 
 
 def step(tr,t,people,objects,exit=False):
@@ -36,13 +36,62 @@ def test_bag_employee_departure_not_contents():
 
 def test_bag_visitor_departure_and_background_exclusion():
     tr=front_scene()
-    for t in range(2,6): step(tr,t,[FRONT,VISITOR],[obj()])
-    events=[e for t in range(6,10) for e in step(tr,t,[FRONT],[obj()],exit=t==6)]
+    for t in range(2,6): step(tr,t,[FRONT,VISITOR],[obj(dy=(t-2)*10)])
+    events=[e for t in range(6,10) for e in step(tr,t,[FRONT],[obj(dy=30)],exit=t==6)]
     assert [e['rule_id'] for e in events]==['bag_left_by_visitor']
+    assert events[0]['evidence_times']==[2,6,8]
     tr=front_scene()
     for t in range(2,5): step(tr,t,[FRONT],[obj()])
     for t in range(5,8): step(tr,t,[FRONT,VISITOR],[obj()])
     assert not [e for t in range(8,12) for e in step(tr,t,[FRONT],[obj()],exit=t==8)]
+
+
+@pytest.mark.parametrize('dx,dy',[(350,0),(0,30)])
+def test_stationary_item_first_detected_during_visit_is_not_delivered_bag(dx,dy):
+    tr=front_scene()
+    # A machine/phone may first get a bag label late in the visit; that is not arrival.
+    for t in range(2,32): step(tr,t,[FRONT,VISITOR],[])
+    for t in range(32,61): step(tr,t,[FRONT,VISITOR],[obj(dx=dx,dy=dy)])
+    assert not [e for t in range(61,66) for e in step(tr,t,[FRONT],[obj(dx=dx,dy=dy)],exit=t==61)]
+
+
+def test_small_detection_jitter_is_not_bag_transfer():
+    tr=front_scene()
+    for t in range(2,20): step(tr,t,[FRONT,VISITOR],[obj(dx=t%3,dy=30+t%2)])
+    assert not [e for t in range(20,25) for e in step(tr,t,[FRONT],[obj(dy=30)],exit=t==20)]
+
+
+@pytest.mark.parametrize('missing_contact',['visitor','staff'])
+def test_moving_bag_needs_both_sides_of_transfer(missing_contact):
+    tr=front_scene()
+    for t in range(2,6):
+        # Direct update isolates the handoff condition from role inference.
+        tr.update(t,[FRONT] if missing_contact=='visitor' else [],
+                  [] if missing_contact=='visitor' else [VISITOR],False,[obj(dy=(t-2)*10)])
+    assert not [e for t in range(6,10) for e in tr.update(t,[FRONT],[],t==6,[obj(dy=30)])]
+
+
+def test_lost_bag_track_does_not_reuse_old_handoff():
+    tr=front_scene()
+    for t in range(2,6): step(tr,t,[FRONT,VISITOR],[obj(dy=(t-2)*10)])
+    for t in (6,7): step(tr,t,[FRONT,VISITOR],[])
+    # Three steps after the last box: old track must expire BEFORE matching.
+    for t in (8,9): step(tr,t,[FRONT,VISITOR],[obj(dy=30)])
+    assert not [e for t in range(10,15) for e in step(tr,t,[FRONT],[obj(dy=30)],exit=t==10)]
+
+
+def test_duplicate_bag_boxes_do_not_establish_repeated_visitor_contact():
+    tr=front_scene()
+    step(tr,2,[FRONT,VISITOR],[obj(),obj(),obj()])
+    assert tr.tracks[0]['visitor_contact_hits']==1
+
+
+def test_machine_fragment_clipped_at_desk_crop_boundary_is_not_a_bag():
+    tr=front_scene()
+    clipped={'label':'bag','score':.8,'box':[120,440,240,530]}
+    for t in range(2,6): step(tr,t,[FRONT,VISITOR],[clipped])
+    assert not tr.tracks
+    assert not [e for t in range(6,10) for e in step(tr,t,[FRONT],[clipped],exit=t==6)]
 
 
 def test_no_bag_departure_without_exit_or_when_bag_removed():

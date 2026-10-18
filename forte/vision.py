@@ -21,6 +21,11 @@ PROMPTS = {
     "container": "a small container",
     "laptop": "a laptop",
     "coins": "coins",
+    "id_card": "an identity card",
+    "passport": "a passport",
+    "cash_counter": "a money counting machine",
+    "cash_detector": "a banknote detector",
+    "hand": "a hand",
 }
 
 

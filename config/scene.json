@@ -11,6 +11,7 @@
   "safe_seconds": 5.0,
   "safe_calibration": "safe_prototypes.json",
   "key_calibration": "key_calibration.json",
+  "door_calibration": "door_calibration.json",
   "sample_seconds": 1.0,
   "door": [0.08, 0.15, 0.36, 0.45],
   "service_absence_seconds": 5,
@@ -19,6 +20,11 @@
   "cash_return_search": [0.20, 0.44, 0.52, 0.59],
   "cash_continuity_search": [0.20, 0.46, 0.58, 0.57],
   "desk_material_search": [0.23, 0.40, 0.67, 0.56],
-  "enabled_rules": ["cash_unattended", "prev_client_cash", "safe_left_open", "left_during_service", "personal_items", "phone_with_camera", "door_open", "camera_obstructed", "food_at_workplace", "pc_not_shutdown", "possible_incomplete_cash_return", "bag_left_by_employee", "bag_left_by_visitor", "several_clients", "desk_materials_left", "key_left_in_lock"],
-  "note": "Experimental multi-rule candidate search for known camera layouts only. Sixteen visual heuristics, not certified violation detection. Front-operator layout inferred from initial observations. Cabinet and lock calibration supports one camera/cabinet position. Thresholds are engineering settings, not legal deadlines. Other catalog rules require manual evidence."
+  "identity_search": [0.18, 0.36, 0.68, 0.60],
+  "identity_interaction_zone": [0.20, 0.44, 0.52, 0.57],
+  "cash_check_search": [0.18, 0.33, 0.72, 0.54],
+  "cash_check_hands": [0.27, 0.34, 0.67, 0.52],
+  "departure_search": [0.18, 0.33, 0.78, 0.60],
+  "enabled_rules": ["cash_unattended", "prev_client_cash", "safe_left_open", "left_during_service", "personal_items", "phone_with_camera", "door_open", "camera_obstructed", "food_at_workplace", "pc_not_shutdown", "possible_incomplete_cash_return", "bag_left_by_employee", "bag_left_by_visitor", "several_clients", "desk_materials_left", "key_left_in_lock", "no_client_id", "no_count_check", "outsider_in_cashroom", "count_without_client"],
+  "note": "Experimental multi-rule candidate search for known camera layouts only. Twenty visual heuristics, not certified violation detection. Front-operator layout inferred from initial observations. Cash post-counter check supports only the right-hand equipment layout; manual recount is not recognized. Cabinet and lock calibration supports one camera/cabinet position. Thresholds are engineering settings, not legal deadlines. Other catalog rules require manual evidence."
 }
