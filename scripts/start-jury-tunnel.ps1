@@ -59,15 +59,24 @@ try {
     Write-Host 'Opening a temporary public Cloudflare HTTPS tunnel...'
     Write-Host 'Copy the https://...trycloudflare.com address shown below, add /docs, and send it with the key only to the jury.'
     Write-Host 'The public address stops working when this window is closed.'
-    & $cloudflaredPath tunnel --url http://127.0.0.1:8000 2>&1 | ForEach-Object {
-        $line = $_.ToString()
-        Write-Host $line
-        if ($line -match 'https://[-a-z0-9]+\.trycloudflare\.com') {
-            [IO.File]::WriteAllText($urlPath, $Matches[0])
-            Write-Host "Jury API address saved to $urlPath"
+    # cloudflared writes normal status messages to stderr. PowerShell 7 exposes
+    # these as NativeCommandError records, so allow them through the pipe instead
+    # of treating the first banner as a terminating script error.
+    $priorErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $cloudflaredPath tunnel --url http://127.0.0.1:8000 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            if ($line -match 'https://[-a-z0-9]+\.trycloudflare\.com') {
+                [IO.File]::WriteAllText($urlPath, $Matches[0])
+                Write-Host "Jury API address saved to $urlPath"
+            }
         }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $priorErrorAction
     }
-    $exitCode = $LASTEXITCODE
 } finally {
     if ($api -and !$api.HasExited) { Stop-Process -Id $api.Id -Force }
 }
